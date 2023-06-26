@@ -45,3 +45,6 @@ dist
 .vscode
 .idea
 .fleet
+
+.rocks*
+.hub*
