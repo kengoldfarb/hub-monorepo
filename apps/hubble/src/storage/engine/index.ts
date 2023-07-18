@@ -1,10 +1,12 @@
 import {
   bytesCompare,
   bytesToHexString,
+  bytesToUtf8String,
   CastAddMessage,
   CastId,
   CastRemoveMessage,
   FarcasterNetwork,
+  hexStringToBytes,
   HubAsyncResult,
   HubError,
   HubEvent,
@@ -14,51 +16,60 @@ import {
   isSignerAddMessage,
   isSignerRemoveMessage,
   isUserDataAddMessage,
+  isUsernameProofMessage,
   LinkAddMessage,
   LinkRemoveMessage,
   MergeIdRegistryEventHubEvent,
   MergeMessageHubEvent,
-  MergeNameRegistryEventHubEvent,
+  MergeUsernameProofHubEvent,
   Message,
   NameRegistryEvent,
-  UserNameProof,
   NameRegistryEventType,
   PruneMessageHubEvent,
   ReactionAddMessage,
   ReactionRemoveMessage,
   ReactionType,
+  RentRegistryEvent,
   RevokeMessageHubEvent,
   RevokeMessagesBySignerJobPayload,
   SignerAddMessage,
   SignerRemoveMessage,
+  StorageAdminRegistryEvent,
+  StorageRegistryEventType,
   UserDataAddMessage,
   UserDataType,
+  UserNameProof,
+  UserNameType,
   utf8StringToBytes,
   validations,
   VerificationAddEthAddressMessage,
   VerificationRemoveMessage,
-} from '@farcaster/hub-nodejs';
-import { err, ok, Result, ResultAsync } from 'neverthrow';
-import fs from 'fs';
-import { Worker } from 'worker_threads';
-import { getMessage, getMessagesBySignerIterator, typeToSetPostfix } from '../db/message.js';
-import RocksDB from '../db/rocksdb.js';
-import { TSHASH_LENGTH, UserPostfix } from '../db/types.js';
-import CastStore from '../stores/castStore.js';
-import LinkStore from '../stores/linkStore.js';
-import ReactionStore from '../stores/reactionStore.js';
-import SignerStore from '../stores/signerStore.js';
-import StoreEventHandler from '../stores/storeEventHandler.js';
-import { MessagesPage, PageOptions } from '../stores/types.js';
-import UserDataStore from '../stores/userDataStore.js';
-import VerificationStore from '../stores/verificationStore.js';
-import { logger } from '../../utils/logger.js';
-import { RevokeMessagesBySignerJobQueue, RevokeMessagesBySignerJobWorker } from '../jobs/revokeMessagesBySignerJob.js';
-import { getIdRegistryEventByCustodyAddress } from '../db/idRegistryEvent.js';
-import { ensureAboveTargetFarcasterVersion } from '../../utils/versions.js';
+} from "@farcaster/hub-nodejs";
+import { err, ok, Result, ResultAsync } from "neverthrow";
+import fs from "fs";
+import { Worker } from "worker_threads";
+import { getMessage, getMessagesBySignerIterator, typeToSetPostfix } from "../db/message.js";
+import RocksDB from "../db/rocksdb.js";
+import { TSHASH_LENGTH, UserPostfix } from "../db/types.js";
+import CastStore from "../stores/castStore.js";
+import LinkStore from "../stores/linkStore.js";
+import ReactionStore from "../stores/reactionStore.js";
+import SignerStore from "../stores/signerStore.js";
+import StoreEventHandler from "../stores/storeEventHandler.js";
+import { MessagesPage, PageOptions } from "../stores/types.js";
+import UserDataStore from "../stores/userDataStore.js";
+import VerificationStore from "../stores/verificationStore.js";
+import { logger } from "../../utils/logger.js";
+import { RevokeMessagesBySignerJobQueue, RevokeMessagesBySignerJobWorker } from "../jobs/revokeMessagesBySignerJob.js";
+import { ensureAboveTargetFarcasterVersion } from "../../utils/versions.js";
+import StorageEventStore from "../stores/storageEventStore.js";
+import { RentRegistryEventsResponse } from "@farcaster/hub-nodejs";
+import { PublicClient } from "viem";
+import { normalize } from "viem/ens";
+import UsernameProofStore from "../stores/usernameProofStore.js";
 
 const log = logger.child({
-  component: 'Engine',
+  component: "Engine",
 });
 
 class Engine {
@@ -66,6 +77,7 @@ class Engine {
 
   private _db: RocksDB;
   private _network: FarcasterNetwork;
+  private _publicClient: PublicClient | undefined;
 
   private _linkStore: LinkStore;
   private _reactionStore: ReactionStore;
@@ -73,6 +85,8 @@ class Engine {
   private _castStore: CastStore;
   private _userDataStore: UserDataStore;
   private _verificationStore: VerificationStore;
+  private _storageEventsDataStore: StorageEventStore;
+  private _usernameProofStore: UsernameProofStore;
 
   private _validationWorker: Worker | undefined;
   private _validationWorkerJobId = 0;
@@ -81,9 +95,10 @@ class Engine {
   private _revokeSignerQueue: RevokeMessagesBySignerJobQueue;
   private _revokeSignerWorker: RevokeMessagesBySignerJobWorker;
 
-  constructor(db: RocksDB, network: FarcasterNetwork, eventHandler?: StoreEventHandler) {
+  constructor(db: RocksDB, network: FarcasterNetwork, eventHandler?: StoreEventHandler, publicClient?: PublicClient) {
     this._db = db;
     this._network = network;
+    this._publicClient = publicClient;
 
     this.eventHandler = eventHandler ?? new StoreEventHandler(db);
 
@@ -93,31 +108,33 @@ class Engine {
     this._castStore = new CastStore(db, this.eventHandler);
     this._userDataStore = new UserDataStore(db, this.eventHandler);
     this._verificationStore = new VerificationStore(db, this.eventHandler);
+    this._storageEventsDataStore = new StorageEventStore(db, this.eventHandler);
+    this._usernameProofStore = new UsernameProofStore(db, this.eventHandler);
 
     this._revokeSignerQueue = new RevokeMessagesBySignerJobQueue(db);
     this._revokeSignerWorker = new RevokeMessagesBySignerJobWorker(this._revokeSignerQueue, db, this);
 
     this.handleMergeMessageEvent = this.handleMergeMessageEvent.bind(this);
     this.handleMergeIdRegistryEvent = this.handleMergeIdRegistryEvent.bind(this);
-    this.handleMergeNameRegistryEvent = this.handleMergeNameRegistryEvent.bind(this);
+    this.handleMergeUsernameProofEvent = this.handleMergeUsernameProofEvent.bind(this);
     this.handleRevokeMessageEvent = this.handleRevokeMessageEvent.bind(this);
     this.handlePruneMessageEvent = this.handlePruneMessageEvent.bind(this);
   }
 
   async start(): Promise<void> {
-    log.info('starting engine');
+    log.info("starting engine");
 
     this._revokeSignerWorker.start();
 
     if (!this._validationWorker) {
-      const workerPath = './build/storage/engine/validation.worker.js';
+      const workerPath = "./build/storage/engine/validation.worker.js";
       try {
         if (fs.existsSync(workerPath)) {
           this._validationWorker = new Worker(workerPath);
 
-          logger.info({ workerPath }, 'created validation worker thread');
+          logger.info({ workerPath }, "created validation worker thread");
 
-          this._validationWorker.on('message', (data) => {
+          this._validationWorker.on("message", (data) => {
             const { id, message, errCode, errMessage } = data;
             const resolve = this._validationWorkerPromiseMap.get(id);
 
@@ -129,34 +146,34 @@ class Engine {
                 resolve(err(new HubError(errCode, errMessage)));
               }
             } else {
-              logger.warn({ id }, 'validation worker promise.response not found');
+              logger.warn({ id }, "validation worker promise.response not found");
             }
           });
         } else {
-          logger.warn({ workerPath }, 'validation.worker.js not found, falling back to main thread');
+          logger.warn({ workerPath }, "validation.worker.js not found, falling back to main thread");
         }
       } catch (e) {
-        logger.warn({ workerPath, e }, 'failed to create validation worker, falling back to main thread');
+        logger.warn({ workerPath, e }, "failed to create validation worker, falling back to main thread");
       }
     }
 
-    this.eventHandler.on('mergeIdRegistryEvent', this.handleMergeIdRegistryEvent);
-    this.eventHandler.on('mergeNameRegistryEvent', this.handleMergeNameRegistryEvent);
-    this.eventHandler.on('mergeMessage', this.handleMergeMessageEvent);
-    this.eventHandler.on('revokeMessage', this.handleRevokeMessageEvent);
-    this.eventHandler.on('pruneMessage', this.handlePruneMessageEvent);
+    this.eventHandler.on("mergeIdRegistryEvent", this.handleMergeIdRegistryEvent);
+    this.eventHandler.on("mergeUsernameProofEvent", this.handleMergeUsernameProofEvent);
+    this.eventHandler.on("mergeMessage", this.handleMergeMessageEvent);
+    this.eventHandler.on("revokeMessage", this.handleRevokeMessageEvent);
+    this.eventHandler.on("pruneMessage", this.handlePruneMessageEvent);
 
     await this.eventHandler.syncCache();
-    log.info('engine started');
+    log.info("engine started");
   }
 
   async stop(): Promise<void> {
-    log.info('stopping engine');
-    this.eventHandler.off('mergeIdRegistryEvent', this.handleMergeIdRegistryEvent);
-    this.eventHandler.off('mergeNameRegistryEvent', this.handleMergeNameRegistryEvent);
-    this.eventHandler.off('mergeMessage', this.handleMergeMessageEvent);
-    this.eventHandler.off('revokeMessage', this.handleRevokeMessageEvent);
-    this.eventHandler.off('pruneMessage', this.handlePruneMessageEvent);
+    log.info("stopping engine");
+    this.eventHandler.off("mergeIdRegistryEvent", this.handleMergeIdRegistryEvent);
+    this.eventHandler.off("mergeUsernameProofEvent", this.handleMergeUsernameProofEvent);
+    this.eventHandler.off("mergeMessage", this.handleMergeMessageEvent);
+    this.eventHandler.off("revokeMessage", this.handleRevokeMessageEvent);
+    this.eventHandler.off("pruneMessage", this.handlePruneMessageEvent);
 
     this._revokeSignerWorker.start();
 
@@ -164,7 +181,11 @@ class Engine {
       await this._validationWorker.terminate();
       this._validationWorker = undefined;
     }
-    log.info('engine stopped');
+    log.info("engine stopped");
+  }
+
+  getDb(): RocksDB {
+    return this._db;
   }
 
   async mergeMessages(messages: Message[]): Promise<Array<HubResult<number>>> {
@@ -177,12 +198,12 @@ class Engine {
       return err(validatedMessage.error);
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    // rome-ignore lint/style/noNonNullAssertion: legacy code, avoid using ignore for new code
     const setPostfix = typeToSetPostfix(message.data!.type);
 
     switch (setPostfix) {
       case UserPostfix.LinkMessage: {
-        const versionCheck = ensureAboveTargetFarcasterVersion('2023.4.19');
+        const versionCheck = ensureAboveTargetFarcasterVersion("2023.4.19");
         if (versionCheck.isErr()) {
           return err(versionCheck.error);
         }
@@ -204,8 +225,11 @@ class Engine {
       case UserPostfix.VerificationMessage: {
         return ResultAsync.fromPromise(this._verificationStore.merge(message), (e) => e as HubError);
       }
+      case UserPostfix.UsernameProofMessage: {
+        return ResultAsync.fromPromise(this._usernameProofStore.merge(message), (e) => e as HubError);
+      }
       default: {
-        return err(new HubError('bad_request.validation_failure', 'invalid message type'));
+        return err(new HubError("bad_request.validation_failure", "invalid message type"));
       }
     }
   }
@@ -215,7 +239,7 @@ class Engine {
       return ResultAsync.fromPromise(this._signerStore.mergeIdRegistryEvent(event), (e) => e as HubError);
     }
 
-    return err(new HubError('bad_request.validation_failure', 'invalid event type'));
+    return err(new HubError("bad_request.validation_failure", "invalid event type"));
   }
 
   async mergeNameRegistryEvent(event: NameRegistryEvent): HubAsyncResult<number> {
@@ -223,7 +247,31 @@ class Engine {
       return ResultAsync.fromPromise(this._userDataStore.mergeNameRegistryEvent(event), (e) => e as HubError);
     }
 
-    return err(new HubError('bad_request.validation_failure', 'invalid event type'));
+    return err(new HubError("bad_request.validation_failure", "invalid event type"));
+  }
+
+  async mergeRentRegistryEvent(event: RentRegistryEvent): HubAsyncResult<number> {
+    if (event.type === StorageRegistryEventType.RENT) {
+      return ResultAsync.fromPromise(this._storageEventsDataStore.mergeRentRegistryEvent(event), (e) => e as HubError);
+    }
+
+    return err(new HubError("bad_request.validation_failure", "invalid event type"));
+  }
+
+  async mergeStorageAdminRegistryEvent(event: StorageAdminRegistryEvent): HubAsyncResult<number> {
+    if (
+      event.type === StorageRegistryEventType.SET_DEPRECATION_TIMESTAMP ||
+      event.type === StorageRegistryEventType.SET_GRACE_PERIOD ||
+      event.type === StorageRegistryEventType.SET_MAX_UNITS ||
+      event.type === StorageRegistryEventType.SET_PRICE
+    ) {
+      return ResultAsync.fromPromise(
+        this._storageEventsDataStore.mergeStorageAdminRegistryEvent(event),
+        (e) => e as HubError,
+      );
+    }
+
+    return err(new HubError("bad_request.validation_failure", "invalid event type"));
   }
 
   async mergeUserNameProof(usernameProof: UserNameProof): HubAsyncResult<number> {
@@ -248,7 +296,7 @@ class Engine {
       const tsHash = Uint8Array.from(key.subarray(length - TSHASH_LENGTH));
       const message = await ResultAsync.fromPromise(
         getMessage(this._db, fid, setPostfix, tsHash),
-        (e) => e as HubError
+        (e) => e as HubError,
       );
       if (message.isErr()) {
         return err(message.error);
@@ -273,8 +321,11 @@ class Engine {
         case UserPostfix.VerificationMessage: {
           return this._verificationStore.revoke(message.value);
         }
+        case UserPostfix.UsernameProofMessage: {
+          return this._usernameProofStore.revoke(message.value);
+        }
         default: {
-          return err(new HubError('bad_request.invalid_param', 'invalid message type'));
+          return err(new HubError("bad_request.invalid_param", "invalid message type"));
         }
       }
     };
@@ -288,9 +339,9 @@ class Engine {
         (e) => {
           log.error(
             { errCode: e.errCode },
-            `error revoking message from signer ${signerHex.value} and fid ${fid}: ${e.message}`
+            `error revoking message from signer ${signerHex.value} and fid ${fid}: ${e.message}`,
           );
-        }
+        },
       );
     }
 
@@ -311,27 +362,27 @@ class Engine {
         },
         (e) => {
           log.error({ errCode: e.errCode }, `error pruning ${store} messages for fid ${fid}: ${e.message}`);
-        }
+        },
       );
     };
 
     const signerResult = await this._signerStore.pruneMessages(fid);
-    logPruneResult(signerResult, 'signer');
+    logPruneResult(signerResult, "signer");
 
     const castResult = await this._castStore.pruneMessages(fid);
-    logPruneResult(castResult, 'cast');
+    logPruneResult(castResult, "cast");
 
     const reactionResult = await this._reactionStore.pruneMessages(fid);
-    logPruneResult(reactionResult, 'reaction');
+    logPruneResult(reactionResult, "reaction");
 
     const verificationResult = await this._verificationStore.pruneMessages(fid);
-    logPruneResult(verificationResult, 'verification');
+    logPruneResult(verificationResult, "verification");
 
     const userDataResult = await this._userDataStore.pruneMessages(fid);
-    logPruneResult(userDataResult, 'user data');
+    logPruneResult(userDataResult, "user data");
 
     const linkResult = await this._linkStore.pruneMessages(fid);
-    logPruneResult(linkResult, 'link');
+    logPruneResult(linkResult, "link");
 
     return ok(undefined);
   }
@@ -362,8 +413,15 @@ class Engine {
         case UserPostfix.VerificationMessage: {
           return this._verificationStore.revoke(message);
         }
+        case UserPostfix.UsernameProofMessage: {
+          if (isValid.error.errCode === "unavailable.network_failure") {
+            return err(isValid.error);
+          } else {
+            return this._usernameProofStore.revoke(message);
+          }
+        }
         default: {
-          return err(new HubError('bad_request.invalid_param', 'invalid message type'));
+          return err(new HubError("bad_request.invalid_param", "invalid message type"));
         }
       }
     }
@@ -403,7 +461,7 @@ class Engine {
 
   async getCastsByParent(
     parent: CastId | string,
-    pageOptions: PageOptions = {}
+    pageOptions: PageOptions = {},
   ): HubAsyncResult<MessagesPage<CastAddMessage>> {
     const validatedParent = validations.validateParent(parent);
     if (validatedParent.isErr()) {
@@ -415,7 +473,7 @@ class Engine {
 
   async getCastsByMention(
     mentionFid: number,
-    pageOptions: PageOptions = {}
+    pageOptions: PageOptions = {},
   ): HubAsyncResult<MessagesPage<CastAddMessage>> {
     const validatedFid = validations.validateFid(mentionFid);
     if (validatedFid.isErr()) {
@@ -427,7 +485,7 @@ class Engine {
 
   async getAllCastMessagesByFid(
     fid: number,
-    pageOptions: PageOptions = {}
+    pageOptions: PageOptions = {},
   ): HubAsyncResult<MessagesPage<CastAddMessage | CastRemoveMessage>> {
     return ResultAsync.fromPromise(this._castStore.getAllCastMessagesByFid(fid, pageOptions), (e) => e as HubError);
   }
@@ -453,7 +511,7 @@ class Engine {
   async getReactionsByFid(
     fid: number,
     type?: ReactionType,
-    pageOptions: PageOptions = {}
+    pageOptions: PageOptions = {},
   ): HubAsyncResult<MessagesPage<ReactionAddMessage>> {
     const validatedFid = validations.validateFid(fid);
     if (validatedFid.isErr()) {
@@ -462,16 +520,16 @@ class Engine {
 
     return ResultAsync.fromPromise(
       this._reactionStore.getReactionAddsByFid(fid, type, pageOptions),
-      (e) => e as HubError
+      (e) => e as HubError,
     );
   }
 
   async getReactionsByTarget(
     target: CastId | string,
     type?: ReactionType,
-    pageOptions: PageOptions = {}
+    pageOptions: PageOptions = {},
   ): HubAsyncResult<MessagesPage<ReactionAddMessage>> {
-    if (typeof target !== 'string') {
+    if (typeof target !== "string") {
       const validatedCastId = validations.validateCastId(target);
       if (validatedCastId.isErr()) {
         return err(validatedCastId.error);
@@ -480,13 +538,13 @@ class Engine {
 
     return ResultAsync.fromPromise(
       this._reactionStore.getReactionsByTarget(target, type, pageOptions),
-      (e) => e as HubError
+      (e) => e as HubError,
     );
   }
 
   async getAllReactionMessagesByFid(
     fid: number,
-    pageOptions: PageOptions = {}
+    pageOptions: PageOptions = {},
   ): HubAsyncResult<MessagesPage<ReactionAddMessage | ReactionRemoveMessage>> {
     const validatedFid = validations.validateFid(fid);
     if (validatedFid.isErr()) {
@@ -495,7 +553,7 @@ class Engine {
 
     return ResultAsync.fromPromise(
       this._reactionStore.getAllReactionMessagesByFid(fid, pageOptions),
-      (e) => e as HubError
+      (e) => e as HubError,
     );
   }
 
@@ -519,7 +577,7 @@ class Engine {
 
   async getVerificationsByFid(
     fid: number,
-    pageOptions: PageOptions = {}
+    pageOptions: PageOptions = {},
   ): HubAsyncResult<MessagesPage<VerificationAddEthAddressMessage>> {
     const validatedFid = validations.validateFid(fid);
     if (validatedFid.isErr()) {
@@ -528,13 +586,13 @@ class Engine {
 
     return ResultAsync.fromPromise(
       this._verificationStore.getVerificationAddsByFid(fid, pageOptions),
-      (e) => e as HubError
+      (e) => e as HubError,
     );
   }
 
   async getAllVerificationMessagesByFid(
     fid: number,
-    pageOptions: PageOptions = {}
+    pageOptions: PageOptions = {},
   ): HubAsyncResult<MessagesPage<VerificationAddEthAddressMessage | VerificationRemoveMessage>> {
     const validatedFid = validations.validateFid(fid);
     if (validatedFid.isErr()) {
@@ -543,7 +601,7 @@ class Engine {
 
     return ResultAsync.fromPromise(
       this._verificationStore.getAllVerificationMessagesByFid(fid, pageOptions),
-      (e) => e as HubError
+      (e) => e as HubError,
     );
   }
 
@@ -591,7 +649,7 @@ class Engine {
 
   async getAllSignerMessagesByFid(
     fid: number,
-    pageOptions: PageOptions = {}
+    pageOptions: PageOptions = {},
   ): HubAsyncResult<MessagesPage<SignerAddMessage | SignerRemoveMessage>> {
     return ResultAsync.fromPromise(this._signerStore.getAllSignerMessagesByFid(fid, pageOptions), (e) => e as HubError);
   }
@@ -627,12 +685,58 @@ class Engine {
     return ResultAsync.fromPromise(this._userDataStore.getNameRegistryEvent(fname), (e) => e as HubError);
   }
 
+  async getRentRegistryEvents(fid: number): HubAsyncResult<RentRegistryEventsResponse> {
+    const validatedFid = validations.validateFid(fid);
+    if (validatedFid.isErr()) {
+      return err(validatedFid.error);
+    }
+
+    return ResultAsync.fromPromise(this._storageEventsDataStore.getRentRegistryEvents(fid), (e) => e as HubError).map(
+      (events) => RentRegistryEventsResponse.create({ events }),
+    );
+  }
+
+  async getUserNameProof(name: Uint8Array): HubAsyncResult<UserNameProof> {
+    const nameString = bytesToUtf8String(name);
+    if (nameString.isErr()) {
+      return err(nameString.error);
+    }
+    if (nameString.value.endsWith(".eth")) {
+      const validatedEnsName = validations.validateEnsName(name);
+      if (validatedEnsName.isErr()) {
+        return err(validatedEnsName.error);
+      }
+      return ResultAsync.fromPromise(
+        this._usernameProofStore.getUsernameProof(name, UserNameType.USERNAME_TYPE_ENS_L1).then((proof) => {
+          return proof.data.usernameProofBody;
+        }),
+        (e) => e as HubError,
+      );
+    } else {
+      const validatedFname = validations.validateFname(name);
+      if (validatedFname.isErr()) {
+        return err(validatedFname.error);
+      }
+
+      return ResultAsync.fromPromise(this._userDataStore.getUserNameProof(name), (e) => e as HubError);
+    }
+  }
+
+  async getUserNameProofsByFid(fid: number): HubAsyncResult<UserNameProof[]> {
+    const validatedFid = validations.validateFid(fid);
+    if (validatedFid.isErr()) {
+      return err(validatedFid.error);
+    }
+
+    return ResultAsync.fromPromise(this._usernameProofStore.getUsernameProofsByFid(fid), (e) => e as HubError);
+  }
+
   /* -------------------------------------------------------------------------- */
   /*                              Link Store Methods                            */
   /* -------------------------------------------------------------------------- */
 
   async getLink(fid: number, type: string, target: number): HubAsyncResult<LinkAddMessage> {
-    const versionCheck = ensureAboveTargetFarcasterVersion('2023.4.19');
+    const versionCheck = ensureAboveTargetFarcasterVersion("2023.4.19");
     if (versionCheck.isErr()) {
       return err(versionCheck.error);
     }
@@ -653,9 +757,9 @@ class Engine {
   async getLinksByFid(
     fid: number,
     type?: string,
-    pageOptions: PageOptions = {}
+    pageOptions: PageOptions = {},
   ): HubAsyncResult<MessagesPage<LinkAddMessage>> {
-    const versionCheck = ensureAboveTargetFarcasterVersion('2023.4.19');
+    const versionCheck = ensureAboveTargetFarcasterVersion("2023.4.19");
     if (versionCheck.isErr()) {
       return err(versionCheck.error);
     }
@@ -671,14 +775,14 @@ class Engine {
   async getLinksByTarget(
     target: number,
     type?: string,
-    pageOptions: PageOptions = {}
+    pageOptions: PageOptions = {},
   ): HubAsyncResult<MessagesPage<LinkAddMessage>> {
-    const versionCheck = ensureAboveTargetFarcasterVersion('2023.4.19');
+    const versionCheck = ensureAboveTargetFarcasterVersion("2023.4.19");
     if (versionCheck.isErr()) {
       return err(versionCheck.error);
     }
 
-    if (typeof target !== 'string') {
+    if (typeof target !== "string") {
       const validatedTargetId = validations.validateFid(target);
       if (validatedTargetId.isErr()) {
         return err(validatedTargetId.error);
@@ -690,9 +794,9 @@ class Engine {
 
   async getAllLinkMessagesByFid(
     fid: number,
-    pageOptions: PageOptions = {}
+    pageOptions: PageOptions = {},
   ): HubAsyncResult<MessagesPage<LinkAddMessage | LinkRemoveMessage>> {
-    const versionCheck = ensureAboveTargetFarcasterVersion('2023.4.19');
+    const versionCheck = ensureAboveTargetFarcasterVersion("2023.4.19");
     if (versionCheck.isErr()) {
       return err(versionCheck.error);
     }
@@ -712,16 +816,16 @@ class Engine {
   private async validateMessage(message: Message): HubAsyncResult<Message> {
     // 1. Ensure message data is present
     if (!message || !message.data) {
-      return err(new HubError('bad_request.validation_failure', 'message data is missing'));
+      return err(new HubError("bad_request.validation_failure", "message data is missing"));
     }
 
     // 2. Check the network
     if (message.data.network !== this._network) {
       return err(
         new HubError(
-          'bad_request.validation_failure',
-          `incorrect network: ${message.data.network} (expected: ${this._network})`
-        )
+          "bad_request.validation_failure",
+          `incorrect network: ${message.data.network} (expected: ${this._network})`,
+        ),
       );
     }
 
@@ -729,7 +833,7 @@ class Engine {
     const custodyEvent = await this.getIdRegistryEvent(message.data.fid);
 
     if (custodyEvent.isErr()) {
-      return err(new HubError('bad_request.validation_failure', `unknown fid: ${message.data.fid}`));
+      return err(new HubError("bad_request.validation_failure", `unknown fid: ${message.data.fid}`));
     }
 
     // 4. Check that the signer is valid
@@ -739,66 +843,86 @@ class Engine {
         return hex.andThen(([signerHex, custodyHex]) => {
           return err(
             new HubError(
-              'bad_request.validation_failure',
-              `invalid signer: signer ${signerHex} does not match custody address ${custodyHex}`
-            )
+              "bad_request.validation_failure",
+              `invalid signer: signer ${signerHex} does not match custody address ${custodyHex}`,
+            ),
           );
         });
       }
     } else {
       const signerResult = await ResultAsync.fromPromise(
         this._signerStore.getSignerAdd(message.data.fid, message.signer),
-        (e) => e
+        (e) => e,
       );
       if (signerResult.isErr()) {
         const hex = bytesToHexString(message.signer);
         return hex.andThen((signerHex) => {
           return err(
             new HubError(
-              'bad_request.validation_failure',
-              `invalid signer: signer ${signerHex} not found for fid ${message.data?.fid}`
-            )
+              "bad_request.validation_failure",
+              `invalid signer: signer ${signerHex} not found for fid ${message.data?.fid}`,
+            ),
           );
         });
       }
     }
 
     // 5. For fname add UserDataAdd messages, check that the user actually owns the fname
-    if (isUserDataAddMessage(message) && message.data.userDataBody.type === UserDataType.FNAME) {
+    if (isUserDataAddMessage(message) && message.data.userDataBody.type === UserDataType.USERNAME) {
       // For fname messages, check if the user actually owns the fname.
-      const fnameBytes = utf8StringToBytes(message.data.userDataBody.value);
-      if (fnameBytes.isErr()) {
-        return err(fnameBytes.error);
+      const nameBytes = utf8StringToBytes(message.data.userDataBody.value);
+      if (nameBytes.isErr()) {
+        return err(nameBytes.error);
       }
 
       // Users are allowed to set fname = '' to remove their fname, so check to see if fname is set
       // before validating the custody address
-      if (fnameBytes.value.length > 0) {
+      if (nameBytes.value.length > 0) {
         // Get the NameRegistryEvent for the fname
-        const fnameEvent = (await this.getNameRegistryEvent(fnameBytes.value)).mapErr((e) =>
-          e.errCode === 'not_found'
+        const nameProof = (await this.getUserNameProof(nameBytes.value)).mapErr((e) =>
+          e.errCode === "not_found"
             ? new HubError(
-                'bad_request.validation_failure',
-                `fname ${message.data.userDataBody.value} is not registered`
+                "bad_request.validation_failure",
+                `name ${message.data.userDataBody.value} is not registered`,
               )
-            : e
+            : e,
         );
-        if (fnameEvent.isErr()) {
-          return err(fnameEvent.error);
+        if (nameProof.isErr()) {
+          return err(nameProof.error);
         }
 
-        // Check that the custody address for the fname and fid are the same
-        if (bytesCompare(custodyEvent.value.to, fnameEvent.value.to) !== 0) {
-          const hex = Result.combine([bytesToHexString(custodyEvent.value.to), bytesToHexString(fnameEvent.value.to)]);
-          return hex.andThen(([custodySignerHex, fnameSignerHex]) => {
-            return err(
-              new HubError(
-                'bad_request.validation_failure',
-                `fname custody address ${fnameSignerHex} does not match custody address ${custodySignerHex} for fid ${message.data.fid}`
-              )
-            );
-          });
+        if (nameProof.value.type === UserNameType.USERNAME_TYPE_FNAME) {
+          // Check that the custody address for the fname and fid are the same
+          if (bytesCompare(custodyEvent.value.to, nameProof.value.owner) !== 0) {
+            const hex = Result.combine([
+              bytesToHexString(custodyEvent.value.to),
+              bytesToHexString(nameProof.value.owner),
+            ]);
+            return hex.andThen(([custodySignerHex, fnameOwnerHex]) => {
+              return err(
+                new HubError(
+                  "bad_request.validation_failure",
+                  `fname custody address ${fnameOwnerHex} does not match custody address ${custodySignerHex} for fid ${message.data.fid}`,
+                ),
+              );
+            });
+          }
+        } else if (nameProof.value.type === UserNameType.USERNAME_TYPE_ENS_L1) {
+          const result = await this.validateEnsUsernameProof(nameProof.value, custodyEvent.value.to);
+          if (result.isErr()) {
+            return err(result.error);
+          }
+        } else {
+          return err(new HubError("bad_request.validation_failure", "invalid username type"));
         }
+      }
+    }
+
+    // For username proof messages, make sure the name resolves to the users custody address or a connected address actually owns the ens name
+    if (isUsernameProofMessage(message) && message.data.usernameProofBody.type === UserNameType.USERNAME_TYPE_ENS_L1) {
+      const result = await this.validateEnsUsernameProof(message.data.usernameProofBody, custodyEvent.value.to);
+      if (result.isErr()) {
+        return err(result.error);
       }
     }
 
@@ -815,6 +939,45 @@ class Engine {
     }
   }
 
+  private async validateEnsUsernameProof(
+    nameProof: UserNameProof,
+    custodyAddress: Uint8Array,
+  ): HubAsyncResult<undefined> {
+    const nameResult = bytesToUtf8String(nameProof.name);
+    if (nameResult.isErr() || !nameResult.value.endsWith(".eth")) {
+      return err(new HubError("bad_request.validation_failure", `invalid ens name: ${nameProof.name}`));
+    }
+    let resolvedAddress;
+    let resolvedAddressString;
+    try {
+      resolvedAddressString = await this._publicClient?.getEnsAddress({ name: normalize(nameResult.value) });
+      const resolvedAddressBytes = hexStringToBytes(resolvedAddressString || "");
+      if (resolvedAddressBytes.isErr() || resolvedAddressBytes.value.length === 0) {
+        return err(new HubError("bad_request.validation_failure", `no valid address for ${nameResult.value}`));
+      }
+      resolvedAddress = resolvedAddressBytes.value;
+    } catch (e) {
+      return err(new HubError("unavailable.network_failure", `failed to resolve ens name ${nameResult.value}: ${e}`));
+    }
+
+    if (bytesCompare(resolvedAddress, nameProof.owner) !== 0) {
+      return err(
+        new HubError(
+          "bad_request.validation_failure",
+          `resolved address ${resolvedAddressString} does not match proof`,
+        ),
+      );
+    }
+    // If resolved address does not match custody address then check if we have an eth verification for it
+    if (bytesCompare(resolvedAddress, custodyAddress) !== 0) {
+      const verificationResult = await this.getVerification(nameProof.fid, resolvedAddress);
+      if (verificationResult.isErr()) {
+        return err(new HubError("bad_request.validation_failure", `ens name does not belong to fid: ${nameProof.fid}`));
+      }
+    }
+    return ok(undefined);
+  }
+
   private async handleMergeIdRegistryEvent(event: MergeIdRegistryEventHubEvent): HubAsyncResult<void> {
     const { idRegistryEvent } = event.mergeIdRegistryEventBody;
     const fromAddress = idRegistryEvent.from;
@@ -828,14 +991,14 @@ class Engine {
       if (enqueueRevoke.isErr()) {
         log.error(
           { errCode: enqueueRevoke.error.errCode },
-          `failed to enqueue revoke signer job: ${enqueueRevoke.error.message}`
+          `failed to enqueue revoke signer job: ${enqueueRevoke.error.message}`,
         );
       }
 
       // Revoke UserDataAdd fname messages
       const fnameAdd = await ResultAsync.fromPromise(
-        this._userDataStore.getUserDataAdd(idRegistryEvent.fid, UserDataType.FNAME),
-        () => undefined
+        this._userDataStore.getUserDataAdd(idRegistryEvent.fid, UserDataType.USERNAME),
+        () => undefined,
       );
       if (fnameAdd.isOk()) {
         const revokeResult = await this._userDataStore.revoke(fnameAdd.value);
@@ -845,15 +1008,15 @@ class Engine {
             log.info(
               `revoked message ${fnameAddHex._unsafeUnwrap()} for fid ${
                 idRegistryEvent.fid
-              } due to IdRegistryEvent transfer`
+              } due to IdRegistryEvent transfer`,
             ),
           (e) =>
             log.error(
               { errCode: e.errCode },
               `failed to revoke message ${fnameAddHex._unsafeUnwrap()} for fid ${
                 idRegistryEvent.fid
-              } due to IdRegistryEvent transfer: ${e.message}`
-            )
+              } due to IdRegistryEvent transfer: ${e.message}`,
+            ),
         );
       }
     }
@@ -861,43 +1024,47 @@ class Engine {
     return ok(undefined);
   }
 
-  private async handleMergeNameRegistryEvent(event: MergeNameRegistryEventHubEvent): HubAsyncResult<void> {
-    const { nameRegistryEvent } = event.mergeNameRegistryEventBody;
+  private async handleMergeUsernameProofEvent(event: MergeUsernameProofHubEvent): HubAsyncResult<void> {
+    const { deletedUsernameProof } = event.mergeUsernameProofBody;
 
-    // When there is a NameRegistryEvent, we need to check if we need to revoke UserDataAdd messages from the
+    // When there is a UserNameProof, we need to check if we need to revoke UserDataAdd messages from the
     // previous owner of the name.
-    if (nameRegistryEvent.type === NameRegistryEventType.TRANSFER && nameRegistryEvent.from.length > 0) {
-      // Check to see if the from address has an fid
-      const idRegistryEvent = await ResultAsync.fromPromise(
-        getIdRegistryEventByCustodyAddress(this._db, nameRegistryEvent.from),
-        () => undefined
+    if (deletedUsernameProof && deletedUsernameProof.owner.length > 0) {
+      const fid = deletedUsernameProof.fid;
+
+      // Check if this fid assigned the name with a UserDataAdd message
+      const usernameAdd = await ResultAsync.fromPromise(
+        this._userDataStore.getUserDataAdd(fid, UserDataType.USERNAME),
+        () => undefined,
       );
-
-      if (idRegistryEvent.isOk()) {
-        const { fid } = idRegistryEvent.value;
-
-        // Check if this fid assigned the fname with a UserDataAdd message
-        const fnameAdd = await ResultAsync.fromPromise(
-          this._userDataStore.getUserDataAdd(fid, UserDataType.FNAME),
-          () => undefined
-        );
-        if (fnameAdd.isOk()) {
-          const revokeResult = await this._userDataStore.revoke(fnameAdd.value);
-          const fnameAddHex = bytesToHexString(fnameAdd.value.hash);
-          revokeResult.match(
-            () =>
-              log.info(
-                `revoked message ${fnameAddHex._unsafeUnwrap()} for fid ${fid} due to NameRegistryEvent transfer`
-              ),
-            (e) =>
-              log.error(
-                { errCode: e.errCode },
-                `failed to revoke message ${fnameAddHex._unsafeUnwrap()} for fid ${fid} due to NameRegistryEvent transfer: ${
-                  e.message
-                }`
-              )
+      if (usernameAdd.isOk()) {
+        const nameBytes = utf8StringToBytes(usernameAdd.value.data.userDataBody.value);
+        if (!nameBytes.isOk()) {
+          log.error(
+            `failed to convert username add message ${bytesToHexString(
+              usernameAdd.value.hash,
+            )} for fid ${fid} to utf8 string`,
           );
+          return err(nameBytes.error);
         }
+        if (bytesCompare(nameBytes.value, deletedUsernameProof.name) !== 0) {
+          log.debug(`deleted name proof for ${fid} does not match current user name, skipping revoke`);
+          return ok(undefined);
+        }
+
+        const revokeResult = await this._userDataStore.revoke(usernameAdd.value);
+        const usernameAddHex = bytesToHexString(usernameAdd.value.hash);
+        revokeResult.match(
+          () =>
+            log.info(`revoked message ${usernameAddHex._unsafeUnwrap()} for fid ${fid} due to name proof invalidation`),
+          (e) =>
+            log.error(
+              { errCode: e.errCode },
+              `failed to revoke message ${usernameAddHex._unsafeUnwrap()} for fid ${fid} due to name proof invalidation: ${
+                e.message
+              }`,
+            ),
+        );
       }
     }
 
@@ -916,7 +1083,7 @@ class Engine {
       if (enqueueRevoke.isErr()) {
         log.error(
           { errCode: enqueueRevoke.error.errCode },
-          `failed to enqueue revoke signer job: ${enqueueRevoke.error.message}`
+          `failed to enqueue revoke signer job: ${enqueueRevoke.error.message}`,
         );
       }
     }
@@ -936,7 +1103,7 @@ class Engine {
       if (enqueueRevoke.isErr()) {
         log.error(
           { errCode: enqueueRevoke.error.errCode },
-          `failed to enqueue revoke signer job: ${enqueueRevoke.error.message}`
+          `failed to enqueue revoke signer job: ${enqueueRevoke.error.message}`,
         );
       }
     }
@@ -956,7 +1123,7 @@ class Engine {
       if (enqueueRevoke.isErr()) {
         log.error(
           { errCode: enqueueRevoke.error.errCode },
-          `failed to enqueue revoke signer job: ${enqueueRevoke.error.message}`
+          `failed to enqueue revoke signer job: ${enqueueRevoke.error.message}`,
         );
       }
     }

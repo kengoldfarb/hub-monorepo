@@ -1,5 +1,3 @@
-/* eslint no-console: 0 */
-
 import {
   CastAddMessage,
   fromFarcasterTime,
@@ -9,19 +7,19 @@ import {
   isCastAddMessage,
   isUserDataAddMessage,
   UserDataType,
-} from '@farcaster/hub-web';
-import TimeAgo from 'javascript-time-ago';
-import en from 'javascript-time-ago/locale/en';
-import { err, ok, Result } from 'neverthrow';
+} from "@farcaster/hub-web";
+import TimeAgo from "javascript-time-ago";
+import en from "javascript-time-ago/locale/en";
+import { err, ok, Result } from "neverthrow";
 
 TimeAgo.addDefaultLocale(en);
-const timeAgo = new TimeAgo('en-US');
+const timeAgo = new TimeAgo("en-US");
 
 /**
  * Populate the following constants with your own values
  */
 
-const HUB_URL = 'nemes.farcaster.xyz:2283'; // URL of the Hub
+const HUB_URL = "nemes.farcaster.xyz:2283"; // URL of the Hub
 const FIDS = [2, 3]; // User IDs to fetch casts for
 
 /**
@@ -42,14 +40,19 @@ const getPrimaryCastsByFid = async (fid: number, client: HubRpcClient): HubAsync
 };
 
 const getFnameFromFid = async (fid: number, client: HubRpcClient): HubAsyncResult<string> => {
-  const result = await client.getUserData({ fid: fid, userDataType: UserDataType.FNAME });
-  return result.map((message) => {
-    if (isUserDataAddMessage(message)) {
-      return message.data.userDataBody.value;
-    } else {
-      return '';
-    }
-  });
+  const result = await client.getUserData({ fid: fid, userDataType: UserDataType.USERNAME });
+  return ok(
+    result.match(
+      (message) => {
+        if (isUserDataAddMessage(message)) {
+          return message.data.userDataBody.value;
+        } else {
+          return "";
+        }
+      },
+      () => `${fid}!`, // fallback to FID if no username is set
+    ),
+  );
 };
 
 /**
@@ -69,7 +72,7 @@ const compareCasts = (a: CastAddMessage, b: CastAddMessage) => {
  * Converts a CastAddMessage into a printable string representation.
  */
 const castToString = async (cast: CastAddMessage, nameMapping: Map<number, string>, client: HubRpcClient) => {
-  const fname = nameMapping.get(cast.data.fid);
+  const fname = nameMapping.get(cast.data.fid) ?? `${cast.data.fid}!`;
 
   // Convert the timestamp to a human readable string
   // Safety: OK to do this since we know the timestamp coming from the Hub must be in the valid range
@@ -81,18 +84,19 @@ const castToString = async (cast: CastAddMessage, nameMapping: Map<number, strin
   const bytes = encoder.encode(text);
 
   const decoder = new TextDecoder();
-  let textWithMentions = '';
+  let textWithMentions = "";
   let indexBytes = 0;
   for (let i = 0; i < mentions.length; i++) {
     textWithMentions += decoder.decode(bytes.slice(indexBytes, mentionsPositions[i]));
     const result = await getFnameFromFid(mentions[i], client);
+    // rome-ignore lint/suspicious/noAssignInExpressions: legacy code, avoid using ignore for new code
     result.map((fname) => (textWithMentions += fname));
     indexBytes = mentionsPositions[i];
   }
   textWithMentions += decoder.decode(bytes.slice(indexBytes));
 
   // Remove newlines from the message text
-  const textNoLineBreaks = textWithMentions.replace(/(\r\n|\n|\r)/gm, ' ');
+  const textNoLineBreaks = textWithMentions.replace(/(\r\n|\n|\r)/gm, " ");
 
   return `${fname}: ${textNoLineBreaks}\n${dateString}\n`;
 };
@@ -104,13 +108,8 @@ const castToString = async (cast: CastAddMessage, nameMapping: Map<number, strin
   // 1. Create a mapping of fids to fnames, which we'll need later to display messages
   const fidToFname = new Map<number, string>();
 
-  const fnameResultPromises = FIDS.map((fid) => client.getUserData({ fid, userDataType: UserDataType.FNAME }));
-  const fnameResults = Result.combine(await Promise.all(fnameResultPromises));
-
-  if (fnameResults.isErr()) {
-    console.error(fnameResults.error);
-    return;
-  }
+  const fnameResultPromises = FIDS.map((fid) => client.getUserData({ fid, userDataType: UserDataType.USERNAME }));
+  const fnameResults = await Promise.all(fnameResultPromises);
 
   fnameResults.map((result) =>
     result.map((uData) => {
@@ -119,7 +118,7 @@ const castToString = async (cast: CastAddMessage, nameMapping: Map<number, strin
         const fname = uData.data.userDataBody.value;
         fidToFname.set(fid, fname);
       }
-    })
+    }),
   );
 
   // 2. Fetch primary casts for each fid and print them
@@ -127,7 +126,7 @@ const castToString = async (cast: CastAddMessage, nameMapping: Map<number, strin
   const castsResult = Result.combine(await Promise.all(castResultPromises));
 
   if (castsResult.isErr()) {
-    console.error('Fetching fnames failed:' + castsResult.error);
+    console.error(`Fetching fnames failed:${castsResult.error}`);
     return;
   }
 

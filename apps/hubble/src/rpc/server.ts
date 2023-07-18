@@ -35,37 +35,42 @@ import {
   VerificationRemoveMessage,
   SyncStatusResponse,
   SyncStatus,
-} from '@farcaster/hub-nodejs';
-import { err, ok, Result, ResultAsync } from 'neverthrow';
-import { APP_NICKNAME, APP_VERSION, HubInterface } from '../hubble.js';
-import { GossipNode } from '../network/p2p/gossipNode.js';
-import { NodeMetadata } from '../network/sync/merkleTrie.js';
-import SyncEngine from '../network/sync/syncEngine.js';
-import Engine from '../storage/engine/index.js';
-import { MessagesPage } from '../storage/stores/types.js';
-import { logger } from '../utils/logger.js';
-import { addressInfoFromParts } from '../utils/p2p.js';
-import { RateLimiterAbstract, RateLimiterMemory } from 'rate-limiter-flexible';
+  UserNameProof,
+  UsernameProofsResponse,
+} from "@farcaster/hub-nodejs";
+import { err, ok, Result, ResultAsync } from "neverthrow";
+import { APP_NICKNAME, APP_VERSION, HubInterface } from "../hubble.js";
+import { GossipNode } from "../network/p2p/gossipNode.js";
+import { NodeMetadata } from "../network/sync/merkleTrie.js";
+import SyncEngine from "../network/sync/syncEngine.js";
+import Engine from "../storage/engine/index.js";
+import { MessagesPage } from "../storage/stores/types.js";
+import { logger } from "../utils/logger.js";
+import { addressInfoFromParts } from "../utils/p2p.js";
+import { RateLimiterAbstract, RateLimiterMemory } from "rate-limiter-flexible";
 import {
   BufferedStreamWriter,
   STREAM_MESSAGE_BUFFER_SIZE,
   SLOW_CLIENT_GRACE_PERIOD_MS,
-} from './bufferedStreamWriter.js';
-import { sleep } from '../utils/crypto.js';
+} from "./bufferedStreamWriter.js";
+import { sleep } from "../utils/crypto.js";
+import { RentRegistryEventsResponse } from "@farcaster/hub-nodejs";
+
+const HUBEVENTS_READER_TIMEOUT = 1 * 60 * 60 * 1000; // 1 hour
 
 export type RpcUsers = Map<string, string[]>;
 
-const log = logger.child({ component: 'rpcServer' });
+const log = logger.child({ component: "rpcServer" });
 
 export const rateLimitByIp = async (ip: string, limiter: RateLimiterAbstract): HubAsyncResult<boolean> => {
   // Get the IP part of the address
-  const ipPart = ip.split(':')[0] ?? '';
+  const ipPart = ip.split(":")[0] ?? "";
 
   try {
     await limiter.consume(ipPart);
     return ok(true);
   } catch (e) {
-    return err(new HubError('unavailable', 'Too many requests'));
+    return err(new HubError("unavailable", "Too many requests"));
   }
 };
 
@@ -76,62 +81,63 @@ export const authenticateUser = async (metadata: Metadata, rpcUsers: RpcUsers): 
     return ok(true);
   }
 
-  if (metadata.get('authorization')) {
-    const authHeader = metadata.get('authorization')[0] as string;
+  if (metadata.get("authorization")) {
+    const authHeader = metadata.get("authorization")[0] as string;
     if (!authHeader) {
-      return err(new HubError('unauthenticated', 'Authorization header is empty'));
+      return err(new HubError("unauthenticated", "Authorization header is empty"));
     }
 
-    const encodedCredentials = authHeader.replace('Basic ', '');
-    const decodedCredentials = Buffer.from(encodedCredentials, 'base64').toString('utf-8');
-    const [username, password] = decodedCredentials.split(':');
+    const encodedCredentials = authHeader.replace("Basic ", "");
+    const decodedCredentials = Buffer.from(encodedCredentials, "base64").toString("utf-8");
+    const [username, password] = decodedCredentials.split(":");
     if (!username || !password) {
-      return err(new HubError('unauthenticated', `Invalid username: ${username}`));
+      return err(new HubError("unauthenticated", `Invalid username: ${username}`));
     }
 
     // See if username and password match one of rpcUsers
     const allowedPasswords = rpcUsers.get(username);
     if (!allowedPasswords) {
-      return err(new HubError('unauthenticated', `Invalid username: ${username}`));
+      return err(new HubError("unauthenticated", `Invalid username: ${username}`));
     }
 
     if (!allowedPasswords.includes(password)) {
-      return err(new HubError('unauthenticated', `Invalid password for user: ${username}`));
+      return err(new HubError("unauthenticated", `Invalid password for user: ${username}`));
     }
 
     return ok(true);
   }
-  return err(new HubError('unauthenticated', 'No authorization header'));
+  return err(new HubError("unauthenticated", "No authorization header"));
 };
 
 export const toServiceError = (err: HubError): ServiceError => {
   let grpcCode: number;
-  if (err.errCode === 'unauthenticated') {
+  if (err.errCode === "unauthenticated") {
     grpcCode = status.UNAUTHENTICATED;
-  } else if (err.errCode === 'unauthorized') {
+  } else if (err.errCode === "unauthorized") {
     grpcCode = status.PERMISSION_DENIED;
   } else if (
-    err.errCode === 'bad_request' ||
-    err.errCode === 'bad_request.parse_failure' ||
-    err.errCode === 'bad_request.validation_failure' ||
-    err.errCode === 'bad_request.invalid_param' ||
-    err.errCode === 'bad_request.conflict' ||
-    err.errCode === 'bad_request.duplicate'
+    err.errCode === "bad_request" ||
+    err.errCode === "bad_request.parse_failure" ||
+    err.errCode === "bad_request.validation_failure" ||
+    err.errCode === "bad_request.invalid_param" ||
+    err.errCode === "bad_request.conflict" ||
+    err.errCode === "bad_request.duplicate" ||
+    err.errCode === "bad_request.prunable"
   ) {
     grpcCode = status.INVALID_ARGUMENT;
-  } else if (err.errCode === 'not_found') {
+  } else if (err.errCode === "not_found") {
     grpcCode = status.NOT_FOUND;
   } else if (
-    err.errCode === 'unavailable' ||
-    err.errCode === 'unavailable.network_failure' ||
-    err.errCode === 'unavailable.storage_failure'
+    err.errCode === "unavailable" ||
+    err.errCode === "unavailable.network_failure" ||
+    err.errCode === "unavailable.storage_failure"
   ) {
     grpcCode = status.UNAVAILABLE;
   } else {
     grpcCode = status.UNKNOWN;
   }
   const metadata = new Metadata();
-  metadata.set('errCode', err.errCode);
+  metadata.set("errCode", err.errCode);
   return Object.assign(err, {
     code: grpcCode,
     details: err.message,
@@ -152,12 +158,12 @@ export const getRPCUsersFromAuthString = (rpcAuth?: string): Map<string, string[
   }
 
   // Split up the auth string by commas
-  const rpcAuthUsers = rpcAuth?.split(',') ?? [];
+  const rpcAuthUsers = rpcAuth?.split(",") ?? [];
 
   // Create a map of username to all the passwords for that user
   const rpcUsers = new Map();
   rpcAuthUsers.forEach((rpcAuthUser) => {
-    const [username, password] = rpcAuthUser.split(':');
+    const [username, password] = rpcAuthUser.split(":");
     if (username && password) {
       const passwords = rpcUsers.get(username) ?? [];
       passwords.push(password);
@@ -188,7 +194,7 @@ export default class Server {
     syncEngine?: SyncEngine,
     gossipNode?: GossipNode,
     rpcAuth?: string,
-    rpcRateLimit?: number
+    rpcRateLimit?: number,
   ) {
     this.hub = hub;
     this.engine = engine;
@@ -197,13 +203,13 @@ export default class Server {
 
     this.grpcServer = getServer();
 
-    this.listenIp = '';
+    this.listenIp = "";
     this.port = 0;
 
     this.rpcUsers = getRPCUsersFromAuthString(rpcAuth);
 
     if (this.rpcUsers.size > 0) {
-      log.info({ num_users: this.rpcUsers.size }, 'RPC auth enabled');
+      log.info({ num_users: this.rpcUsers.size }, "RPC auth enabled");
     }
 
     this.grpcServer.addService(HubServiceService, this.getImpl());
@@ -220,11 +226,11 @@ export default class Server {
     });
   }
 
-  async start(ip = '0.0.0.0', port = 0): Promise<number> {
+  async start(ip = "0.0.0.0", port = 0): Promise<number> {
     return new Promise((resolve, reject) => {
       this.grpcServer.bindAsync(`${ip}:${port}`, ServerCredentials.createInsecure(), (err, port) => {
         if (err) {
-          logger.error({ component: 'gRPC Server', err }, 'Failed to start gRPC Server');
+          logger.error({ component: "gRPC Server", err }, "Failed to start gRPC Server");
           reject(err);
         } else {
           this.grpcServer.start();
@@ -232,7 +238,7 @@ export default class Server {
           this.listenIp = ip;
           this.port = port;
 
-          logger.info({ component: 'gRPC Server', address: this.address }, 'Starting gRPC Server');
+          logger.info({ component: "gRPC Server", address: this.address }, "Starting gRPC Server");
           resolve(port);
         }
       });
@@ -243,15 +249,15 @@ export default class Server {
     return new Promise((resolve, reject) => {
       if (force) {
         this.grpcServer.forceShutdown();
-        log.info({ component: 'gRPC Server' }, `Force shutdown succeeded`);
+        log.info({ component: "gRPC Server" }, "Force shutdown succeeded");
         resolve();
       } else {
         this.grpcServer.tryShutdown((err) => {
           if (err) {
-            log.error({ component: 'gRPC Server' }, `Shutdown failed: ${err}`);
+            log.error({ component: "gRPC Server" }, `Shutdown failed: ${err}`);
             reject(err);
           } else {
-            log.info({ component: 'gRPC Server' }, `Shutdown succeeded`);
+            log.info({ component: "gRPC Server" }, "Shutdown succeeded");
             resolve();
           }
         });
@@ -280,7 +286,7 @@ export default class Server {
             version: APP_VERSION,
             isSyncing: !this.syncEngine?.isSyncing(),
             nickname: APP_NICKNAME,
-            rootHash: (await this.syncEngine?.trie.rootHash()) ?? '',
+            rootHash: (await this.syncEngine?.trie.rootHash()) ?? "",
           });
 
           if (call.request.dbStats && this.syncEngine) {
@@ -298,7 +304,7 @@ export default class Server {
       getSyncStatus: (call, callback) => {
         (async () => {
           if (!this.gossipNode || !this.syncEngine || !this.hub) {
-            callback(toServiceError(new HubError('bad_request', "Hub isn't initialized")));
+            callback(toServiceError(new HubError("bad_request", "Hub isn't initialized")));
             return;
           }
           let peersToCheck: string[];
@@ -352,13 +358,14 @@ export default class Server {
             // Check the messages for corruption. If a message is blank, that means it was present
             // in our sync trie, but the DB couldn't find it. So remove it from the sync Trie.
             const corruptedMessages = messages.filter(
-              (message) => message.data === undefined || message.hash.length === 0
+              (message) => message.data === undefined || message.hash.length === 0,
             );
 
             if (corruptedMessages.length > 0) {
-              log.warn({ num: corruptedMessages.length }, 'Found corrupted messages, rebuilding some syncIDs');
+              log.warn({ num: corruptedMessages.length }, "Found corrupted messages, rebuilding some syncIDs");
               // Don't wait for this to finish, just return the messages we have.
               this.syncEngine?.rebuildSyncIds(request.syncIds);
+              // rome-ignore lint/style/noParameterAssign: legacy code, avoid using ignore for new code
               messages = messages.filter((message) => message.data !== undefined && message.hash.length > 0);
             }
 
@@ -366,7 +373,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getSyncMetadataByPrefix: (call, callback) => {
@@ -385,7 +392,7 @@ export default class Server {
                   numMessages: child.numMessages,
                   hash: child.hash,
                   children: [],
-                })
+                }),
               );
             }
           }
@@ -411,7 +418,7 @@ export default class Server {
         const request = call.request;
 
         (async () => {
-          const rootHash = (await this.syncEngine?.trie.rootHash()) ?? '';
+          const rootHash = (await this.syncEngine?.trie.rootHash()) ?? "";
           const snapshot = await this.syncEngine?.getSnapshotByPrefix(request.prefix);
           snapshot?.match(
             (snapshot) => {
@@ -425,7 +432,7 @@ export default class Server {
             },
             (err: HubError) => {
               callback(toServiceError(err));
-            }
+            },
           );
         })();
       },
@@ -434,10 +441,10 @@ export default class Server {
         let peer;
         const peerResult = Result.fromThrowable(
           () => call.getPeer(),
-          (e) => e
+          (e) => e,
         )();
         if (peerResult.isErr()) {
-          peer = 'unavailable'; // Catchall. If peer is unavailable, we will group all of them into one bucket
+          peer = "unavailable"; // Catchall. If peer is unavailable, we will group all of them into one bucket
         } else {
           peer = peerResult.value;
         }
@@ -445,30 +452,30 @@ export default class Server {
         // Check for rate limits
         const rateLimitResult = await rateLimitByIp(peer, this.submitMessageRateLimiter);
         if (rateLimitResult.isErr()) {
-          logger.warn({ peer }, 'submitMessage rate limited');
-          callback(toServiceError(new HubError('unavailable', 'API rate limit exceeded')));
+          logger.warn({ peer }, "submitMessage rate limited");
+          callback(toServiceError(new HubError("unavailable", "API rate limit exceeded")));
           return;
         }
 
         // Authentication
         const authResult = await authenticateUser(call.metadata, this.rpcUsers);
         if (authResult.isErr()) {
-          logger.warn({ errMsg: authResult.error.message }, 'submitMessage failed');
+          logger.warn({ errMsg: authResult.error.message }, "submitMessage failed");
           callback(
-            toServiceError(new HubError('unauthenticated', `gRPC authentication failed: ${authResult.error.message}`))
+            toServiceError(new HubError("unauthenticated", `gRPC authentication failed: ${authResult.error.message}`)),
           );
           return;
         }
 
         const message = call.request;
-        const result = await this.hub?.submitMessage(message, 'rpc');
+        const result = await this.hub?.submitMessage(message, "rpc");
         result?.match(
           () => {
             callback(null, message);
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getCast: async (call, callback) => {
@@ -481,7 +488,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getCastsByFid: async (call, callback) => {
@@ -498,13 +505,13 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getCastsByParent: async (call, callback) => {
         const { parentCastId, parentUrl, pageSize, pageToken, reverse } = call.request;
 
-        const castsResult = await this.engine?.getCastsByParent(parentCastId ?? parentUrl ?? '', {
+        const castsResult = await this.engine?.getCastsByParent(parentCastId ?? parentUrl ?? "", {
           pageSize,
           pageToken,
           reverse,
@@ -515,7 +522,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getCastsByMention: async (call, callback) => {
@@ -528,7 +535,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getReaction: async (call, callback) => {
@@ -537,7 +544,7 @@ export default class Server {
         const reactionResult = await this.engine?.getReaction(
           request.fid,
           request.reactionType,
-          request.targetCastId ?? request.targetUrl ?? ''
+          request.targetCastId ?? request.targetUrl ?? "",
         );
         reactionResult?.match(
           (reaction: ReactionAddMessage) => {
@@ -545,7 +552,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getReactionsByFid: async (call, callback) => {
@@ -561,7 +568,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getReactionsByCast: async (call, callback) => {
@@ -577,12 +584,12 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getReactionsByTarget: async (call, callback) => {
         const { targetCastId, targetUrl, reactionType, pageSize, pageToken, reverse } = call.request;
-        const reactionsResult = await this.engine?.getReactionsByTarget(targetCastId ?? targetUrl ?? '', reactionType, {
+        const reactionsResult = await this.engine?.getReactionsByTarget(targetCastId ?? targetUrl ?? "", reactionType, {
           pageSize,
           pageToken,
           reverse,
@@ -593,7 +600,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getUserData: async (call, callback) => {
@@ -606,7 +613,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getUserDataByFid: async (call, callback) => {
@@ -623,7 +630,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getNameRegistryEvent: async (call, callback) => {
@@ -636,7 +643,33 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
+        );
+      },
+      getUsernameProof: async (call, callback) => {
+        const request = call.request;
+
+        const usernameProofResult = await this.engine?.getUserNameProof(request.name);
+        usernameProofResult?.match(
+          (usernameProof: UserNameProof) => {
+            callback(null, usernameProof);
+          },
+          (err: HubError) => {
+            callback(toServiceError(err));
+          },
+        );
+      },
+      getUserNameProofsByFid: async (call, callback) => {
+        const request = call.request;
+
+        const usernameProofResult = await this.engine?.getUserNameProofsByFid(request.fid);
+        usernameProofResult?.match(
+          (usernameProofs: UserNameProof[]) => {
+            callback(null, UsernameProofsResponse.create({ proofs: usernameProofs }));
+          },
+          (err: HubError) => {
+            callback(toServiceError(err));
+          },
         );
       },
       getVerification: async (call, callback) => {
@@ -649,7 +682,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getVerificationsByFid: async (call, callback) => {
@@ -666,7 +699,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getSigner: async (call, callback) => {
@@ -679,7 +712,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getSignersByFid: async (call, callback) => {
@@ -695,7 +728,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getIdRegistryEvent: async (call, callback) => {
@@ -707,7 +740,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getLink: async (call, callback) => {
@@ -720,7 +753,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getLinksByFid: async (call, callback) => {
@@ -736,7 +769,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getLinksByTarget: async (call, callback) => {
@@ -752,7 +785,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getIdRegistryEventByAddress: async (call, callback) => {
@@ -764,7 +797,19 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
+        );
+      },
+      getRentRegistryEvents: async (call, callback) => {
+        const request = call.request;
+        const rentRegistryEventsResult = await this.engine?.getRentRegistryEvents(request.fid);
+        rentRegistryEventsResult?.match(
+          (rentRegistryEvents: RentRegistryEventsResponse) => {
+            callback(null, rentRegistryEvents);
+          },
+          (err: HubError) => {
+            callback(toServiceError(err));
+          },
         );
       },
       getFids: async (call, callback) => {
@@ -781,7 +826,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getAllCastMessagesByFid: async (call, callback) => {
@@ -797,7 +842,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getAllReactionMessagesByFid: async (call, callback) => {
@@ -813,7 +858,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getAllVerificationMessagesByFid: async (call, callback) => {
@@ -829,7 +874,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getAllSignerMessagesByFid: async (call, callback) => {
@@ -845,7 +890,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getAllUserDataMessagesByFid: async (call, callback) => {
@@ -861,7 +906,7 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getAllLinkMessagesByFid: async (call, callback) => {
@@ -877,20 +922,20 @@ export default class Server {
           },
           (err: HubError) => {
             callback(toServiceError(err));
-          }
+          },
         );
       },
       getEvent: async (call, callback) => {
         const result = await this.engine?.getEvent(call.request.id);
         result?.match(
           (event: HubEvent) => callback(null, event),
-          (err: HubError) => callback(toServiceError(err))
+          (err: HubError) => callback(toServiceError(err)),
         );
       },
       subscribe: async (stream) => {
         const { request } = stream;
 
-        log.info({ request }, 'subscribe: starting stream');
+        log.info({ request }, "subscribe: starting stream");
 
         // We'll write using a Buffered Stream Writer
         const bufferedStreamWriter = new BufferedStreamWriter(stream);
@@ -900,26 +945,40 @@ export default class Server {
           bufferedStreamWriter.writeToStream(event);
         };
 
-        stream.on('cancelled', () => {
+        stream.on("cancelled", () => {
           stream.destroy();
         });
 
         // Register a close listener to remove all listeners before we start sending events
-        stream.on('close', () => {
-          this.engine?.eventHandler.off('mergeMessage', eventListener);
-          this.engine?.eventHandler.off('pruneMessage', eventListener);
-          this.engine?.eventHandler.off('revokeMessage', eventListener);
-          this.engine?.eventHandler.off('mergeIdRegistryEvent', eventListener);
-          this.engine?.eventHandler.off('mergeNameRegistryEvent', eventListener);
+        stream.on("close", () => {
+          this.engine?.eventHandler.off("mergeMessage", eventListener);
+          this.engine?.eventHandler.off("pruneMessage", eventListener);
+          this.engine?.eventHandler.off("revokeMessage", eventListener);
+          this.engine?.eventHandler.off("mergeIdRegistryEvent", eventListener);
+          this.engine?.eventHandler.off("mergeNameRegistryEvent", eventListener);
+          this.engine?.eventHandler.off("mergeUsernameProofEvent", eventListener);
         });
 
         // If the user wants to start from a specific event, we'll start from there first
         if (this.engine && request.fromId !== undefined && request.fromId >= 0) {
-          const eventsIterator = this.engine.eventHandler.getEventsIterator({ fromId: request.fromId });
-          if (eventsIterator.isErr()) {
-            stream.destroy(eventsIterator.error);
+          const eventsIteratorOpts = this.engine.eventHandler.getEventsIteratorOpts({ fromId: request.fromId });
+          if (eventsIteratorOpts.isErr()) {
+            stream.destroy(eventsIteratorOpts.error);
             return;
           }
+
+          // We'll set a timeout of 1 hour, after which we'll stop writing to the stream
+          // This is to prevent a situation where we're writing to the stream, but the client
+          // is not reading it.
+          const timeout = setTimeout(async () => {
+            logger.warn(
+              { timeout: HUBEVENTS_READER_TIMEOUT, peer: stream.getPeer() },
+              "HubEvents subscribe: timeout, stopping stream",
+            );
+
+            const error = new HubError("unavailable.network_failure", `stream timeout for peer: ${stream.getPeer()}`);
+            stream.destroy(error);
+          }, HUBEVENTS_READER_TIMEOUT);
 
           // Track our RSS usage, to detect a situation where we're writing a lot of data to the stream,
           // but the client is not reading it. If we detect this, we'll stop writing to the stream.
@@ -928,70 +987,76 @@ export default class Server {
           const rssUsage = process.memoryUsage().rss;
           const RSS_USAGE_THRESHOLD = 1_000_000_000; // 1G
 
-          for await (const [, value] of eventsIterator.value) {
-            const event = HubEvent.decode(Uint8Array.from(value as Buffer));
-            if (request.eventTypes.length === 0 || request.eventTypes.includes(event.type)) {
-              const writeResult = bufferedStreamWriter.writeToStream(event);
+          await this.engine.getDb().forEachIterator(
+            async (_key, value) => {
+              const event = HubEvent.decode(Uint8Array.from(value as Buffer));
+              if (request.eventTypes.length === 0 || request.eventTypes.includes(event.type)) {
+                const writeResult = bufferedStreamWriter.writeToStream(event);
 
-              if (writeResult.isErr()) {
-                logger.warn(
-                  { err: writeResult.error },
-                  `subscribe: failed to write to stream while returning events ${request.fromId}`
-                );
-
-                // If the iterator throws, it is already closed, so it doesn't matter.
-                await ResultAsync.fromPromise(eventsIterator.value.end(), (e) => e as Error);
-
-                return;
-              } else {
-                if (writeResult.value === false) {
-                  // If the stream was buffered, we can wait for a bit before continuing
-                  // to allow the client to read the data. If this happens too much, the bufferedStreamWriter
-                  // will timeout and destroy the stream.
-                  // The buffered writer is not async to make it easier to preserve ordering guarantees. So, we sleep here
-                  await sleep(SLOW_CLIENT_GRACE_PERIOD_MS / STREAM_MESSAGE_BUFFER_SIZE);
-                }
-
-                // Write was successful, check the RSS usage
-                if (process.memoryUsage().rss > rssUsage + RSS_USAGE_THRESHOLD) {
-                  // more than 1G, so we're writing a lot of data to the stream, but the client is not reading it.
-                  // We'll destroy the stream.
-                  const error = new HubError(
-                    'unavailable.network_failure',
-                    `stream memory usage too for peer: ${stream.getPeer()}`
+                if (writeResult.isErr()) {
+                  logger.warn(
+                    { err: writeResult.error },
+                    `subscribe: failed to write to stream while returning events ${request.fromId}`,
                   );
-                  logger.error({ errCode: error.errCode }, error.message);
-                  stream.destroy(error);
 
-                  // If the iterator throws, it is already closed, so it doesn't matter.
-                  await ResultAsync.fromPromise(eventsIterator.value.end(), (e) => e as Error);
+                  return true;
+                } else {
+                  if (writeResult.value === false) {
+                    // If the stream was buffered, we can wait for a bit before continuing
+                    // to allow the client to read the data. If this happens too much, the bufferedStreamWriter
+                    // will timeout and destroy the stream.
+                    // The buffered writer is not async to make it easier to preserve ordering guarantees. So, we sleep here
+                    await sleep(SLOW_CLIENT_GRACE_PERIOD_MS / STREAM_MESSAGE_BUFFER_SIZE);
+                  }
 
-                  return;
+                  // Write was successful, check the RSS usage
+                  if (process.memoryUsage().rss > rssUsage + RSS_USAGE_THRESHOLD) {
+                    // more than 1G, so we're writing a lot of data to the stream, but the client is not reading it.
+                    // We'll destroy the stream.
+                    const error = new HubError(
+                      "unavailable.network_failure",
+                      `stream memory usage too much for peer: ${stream.getPeer()}`,
+                    );
+                    logger.error({ errCode: error.errCode }, error.message);
+                    stream.destroy(error);
+
+                    return true;
+                  }
                 }
               }
-            }
-          }
+
+              return false;
+            },
+            eventsIteratorOpts.value,
+            HUBEVENTS_READER_TIMEOUT,
+          );
+
+          // If we reach here, the iterator has ended, so we'll clear the timeout
+          clearTimeout(timeout);
         }
 
         // if no type filters are provided, subscribe to all event types and start streaming events
         if (request.eventTypes.length === 0) {
-          this.engine?.eventHandler.on('mergeMessage', eventListener);
-          this.engine?.eventHandler.on('pruneMessage', eventListener);
-          this.engine?.eventHandler.on('revokeMessage', eventListener);
-          this.engine?.eventHandler.on('mergeIdRegistryEvent', eventListener);
-          this.engine?.eventHandler.on('mergeNameRegistryEvent', eventListener);
+          this.engine?.eventHandler.on("mergeMessage", eventListener);
+          this.engine?.eventHandler.on("pruneMessage", eventListener);
+          this.engine?.eventHandler.on("revokeMessage", eventListener);
+          this.engine?.eventHandler.on("mergeIdRegistryEvent", eventListener);
+          this.engine?.eventHandler.on("mergeNameRegistryEvent", eventListener);
+          this.engine?.eventHandler.on("mergeUsernameProofEvent", eventListener);
         } else {
           for (const eventType of request.eventTypes) {
             if (eventType === HubEventType.MERGE_MESSAGE) {
-              this.engine?.eventHandler.on('mergeMessage', eventListener);
+              this.engine?.eventHandler.on("mergeMessage", eventListener);
             } else if (eventType === HubEventType.PRUNE_MESSAGE) {
-              this.engine?.eventHandler.on('pruneMessage', eventListener);
+              this.engine?.eventHandler.on("pruneMessage", eventListener);
             } else if (eventType === HubEventType.REVOKE_MESSAGE) {
-              this.engine?.eventHandler.on('revokeMessage', eventListener);
+              this.engine?.eventHandler.on("revokeMessage", eventListener);
             } else if (eventType === HubEventType.MERGE_ID_REGISTRY_EVENT) {
-              this.engine?.eventHandler.on('mergeIdRegistryEvent', eventListener);
+              this.engine?.eventHandler.on("mergeIdRegistryEvent", eventListener);
             } else if (eventType === HubEventType.MERGE_NAME_REGISTRY_EVENT) {
-              this.engine?.eventHandler.on('mergeNameRegistryEvent', eventListener);
+              this.engine?.eventHandler.on("mergeNameRegistryEvent", eventListener);
+            } else if (eventType === HubEventType.MERGE_USERNAME_PROOF) {
+              this.engine?.eventHandler.on("mergeUsernameProofEvent", eventListener);
             }
           }
         }

@@ -1,8 +1,8 @@
-import { bytesIncrement, CastId, HubError, HubResult, Message, MessageType } from '@farcaster/hub-nodejs';
-import { err, ok, ResultAsync } from 'neverthrow';
-import RocksDB, { Iterator, Transaction } from './rocksdb.js';
-import { FID_BYTES, RootPrefix, TRUE_VALUE, UserMessagePostfix, UserMessagePostfixMax, UserPostfix } from './types.js';
-import { MessagesPage, PAGE_SIZE_MAX, PageOptions } from '../stores/types.js';
+import { bytesIncrement, CastId, HubError, HubResult, Message, MessageType } from "@farcaster/hub-nodejs";
+import { err, ok, ResultAsync } from "neverthrow";
+import RocksDB, { Iterator, Transaction } from "./rocksdb.js";
+import { FID_BYTES, RootPrefix, TRUE_VALUE, UserMessagePostfix, UserMessagePostfixMax, UserPostfix } from "./types.js";
+import { MessagesPage, PAGE_SIZE_MAX, PageOptions } from "../stores/types.js";
 
 export const makeFidKey = (fid: number): Buffer => {
   const buffer = Buffer.alloc(FID_BYTES);
@@ -10,6 +10,10 @@ export const makeFidKey = (fid: number): Buffer => {
   // This is fine until 4 billion users, after which we'll need to do a migration of this key in the DB.
   buffer.writeUInt32BE(fid, 0);
   return buffer;
+};
+
+export const readFidKey = (buffer: Buffer): number => {
+  return buffer.readUInt32BE(0);
 };
 
 /** <user prefix byte, fid> */
@@ -26,12 +30,12 @@ export const makeCastIdKey = (castId: CastId): Buffer => {
 
 /** <user prefix byte, fid, set index byte, tsHash> */
 export const makeMessagePrimaryKey = (fid: number, set: UserMessagePostfix, tsHash?: Uint8Array): Buffer => {
-  return Buffer.concat([makeUserKey(fid), Buffer.from([set]), Buffer.from(tsHash ?? '')]);
+  return Buffer.concat([makeUserKey(fid), Buffer.from([set]), Buffer.from(tsHash ?? "")]);
 };
 
 export const makeMessagePrimaryKeyFromMessage = (message: Message): Buffer => {
   if (!message.data) {
-    throw new HubError('bad_request.invalid_param', 'message data is missing');
+    throw new HubError("bad_request.invalid_param", "message data is missing");
   }
   const tsHash = makeTsHash(message.data.timestamp, message.hash);
   if (tsHash.isErr()) {
@@ -45,21 +49,21 @@ export const makeMessageBySignerKey = (
   fid: number,
   signer: Uint8Array,
   type?: MessageType,
-  tsHash?: Uint8Array
+  tsHash?: Uint8Array,
 ): Buffer => {
   return Buffer.concat([
     makeUserKey(fid),
     Buffer.from([UserPostfix.BySigner]),
     Buffer.from(signer),
-    Buffer.from(type ? [type] : ''),
-    Buffer.from(tsHash ?? ''),
+    Buffer.from(type ? [type] : ""),
+    Buffer.from(tsHash ?? ""),
   ]);
 };
 
 /** Generate tsHash from timestamp and hash */
 export const makeTsHash = (timestamp: number, hash: Uint8Array): HubResult<Uint8Array> => {
   if (timestamp >= 2 ** 32) {
-    return err(new HubError('bad_request.invalid_param', 'timestamp > 4 bytes'));
+    return err(new HubError("bad_request.invalid_param", "timestamp > 4 bytes"));
   }
   const buffer = Buffer.alloc(4 + hash.length);
 
@@ -95,7 +99,11 @@ export const typeToSetPostfix = (type: MessageType): UserMessagePostfix => {
     return UserPostfix.LinkMessage;
   }
 
-  throw new Error('invalid type');
+  if (type === MessageType.USERNAME_PROOF) {
+    return UserPostfix.UsernameProofMessage;
+  }
+
+  throw new Error("invalid type");
 };
 
 export const putMessage = (db: RocksDB, message: Message): Promise<void> => {
@@ -107,7 +115,7 @@ export const getMessage = async <T extends Message>(
   db: RocksDB,
   fid: number,
   set: UserMessagePostfix,
-  tsHash: Uint8Array
+  tsHash: Uint8Array,
 ): Promise<T> => {
   const buffer = await db.get(makeMessagePrimaryKey(fid, set, tsHash));
   return Message.decode(new Uint8Array(buffer)) as T;
@@ -127,11 +135,11 @@ export const getManyMessagesByFid = async <T extends Message>(
   db: RocksDB,
   fid: number,
   set: UserMessagePostfix,
-  tsHashes: Uint8Array[]
+  tsHashes: Uint8Array[],
 ): Promise<T[]> => {
   return getManyMessages<T>(
     db,
-    tsHashes.map((tsHash) => makeMessagePrimaryKey(fid, set, tsHash))
+    tsHashes.map((tsHash) => makeMessagePrimaryKey(fid, set, tsHash)),
   );
 };
 
@@ -144,10 +152,12 @@ export const getAllMessagesByFid = async (db: RocksDB, fid: number): Promise<Mes
     gte: userPrefix,
     lt: maxPrefix,
   };
-  const messages = [];
-  for await (const [, buffer] of db.iterator(iteratorOptions)) {
+
+  const messages: Message[] = [];
+  await db.forEachIterator((_key, buffer) => {
     messages.push(Message.decode(new Uint8Array(buffer as Buffer)));
-  }
+  }, iteratorOptions);
+
   return messages;
 };
 
@@ -167,7 +177,7 @@ export const getPageIteratorByPrefix = (db: RocksDB, prefix: Buffer, pageOptions
   }
 
   if (pageOptions.pageSize && pageOptions.pageSize > PAGE_SIZE_MAX) {
-    throw new HubError('bad_request.invalid_param', `pageSize > ${PAGE_SIZE_MAX}`);
+    throw new HubError("bad_request.invalid_param", `pageSize > ${PAGE_SIZE_MAX}`);
   }
 
   return db.iterator(
@@ -176,7 +186,7 @@ export const getPageIteratorByPrefix = (db: RocksDB, prefix: Buffer, pageOptions
       : {
           gt: startKey,
           lt: Buffer.from(prefixEnd.value),
-        }
+        },
   );
 };
 
@@ -184,7 +194,7 @@ export const getMessagesPageByPrefix = async <T extends Message>(
   db: RocksDB,
   prefix: Buffer,
   filter: (message: Message) => message is T,
-  pageOptions: PageOptions = {}
+  pageOptions: PageOptions = {},
 ): Promise<MessagesPage<T>> => {
   const iterator = getPageIteratorByPrefix(db, prefix, pageOptions);
 
@@ -225,7 +235,7 @@ export const getMessagesBySignerIterator = (
   db: RocksDB,
   fid: number,
   signer: Uint8Array,
-  type?: MessageType
+  type?: MessageType,
 ): Iterator => {
   const prefix = makeMessageBySignerKey(fid, signer, type);
   return db.iteratorByPrefix(prefix, { values: false });
@@ -236,7 +246,7 @@ export const getAllMessagesBySigner = async <T extends Message>(
   db: RocksDB,
   fid: number,
   signer: Uint8Array,
-  type?: MessageType
+  type?: MessageType,
 ): Promise<T[]> => {
   // Generate prefix by excluding tsHash from the bySignerKey
   // Format of bySignerKey: <user prefix byte, fid, by signer index byte, signer, type, tsHash>
@@ -246,40 +256,35 @@ export const getAllMessagesBySigner = async <T extends Message>(
   const primaryKeys: Buffer[] = [];
 
   // Loop through all keys that start with the given prefix
-  for await (const [key] of db.iteratorByPrefix(prefix, { keyAsBuffer: true, values: false })) {
-    // Get the tsHash for the message using its position in the key relative to the prefix
-    // If the prefix did not include type, add an extra byte to the tsHash offset
-    const tsHashOffset = prefix.length + (type ? 0 : 1);
-    const tsHash = new Uint8Array((key as Buffer).slice(tsHashOffset));
+  await db.forEachIteratorByPrefix(
+    prefix,
+    (key) => {
+      // Get the tsHash for the message using its position in the key relative to the prefix
+      // If the prefix did not include type, add an extra byte to the tsHash offset
+      const tsHashOffset = prefix.length + (type ? 0 : 1);
+      const tsHash = new Uint8Array(key as Buffer).slice(tsHashOffset);
 
-    // Get the type for the message, either from the predefined type variable or by looking at the byte
-    // prior to the tsHash in the key
-    const messageType = type ?? (new Uint8Array(key as Buffer).slice(tsHashOffset - 1, tsHashOffset)[0] as MessageType);
+      // Get the type for the message, either from the predefined type variable or by looking at the byte
+      // prior to the tsHash in the key
+      const messageType =
+        type ?? (new Uint8Array(key as Buffer).slice(tsHashOffset - 1, tsHashOffset)[0] as MessageType);
 
-    // Convert the message type to a set postfix
-    const setPostfix = typeToSetPostfix(messageType);
+      // Convert the message type to a set postfix
+      const setPostfix = typeToSetPostfix(messageType);
 
-    // Use the fid, setPostfix, and tsHash to generate the primaryKey for the message and store it
-    primaryKeys.push(makeMessagePrimaryKey(fid, setPostfix, tsHash));
-  }
+      // Use the fid, setPostfix, and tsHash to generate the primaryKey for the message and store it
+      primaryKeys.push(makeMessagePrimaryKey(fid, setPostfix, tsHash));
+    },
+    { keyAsBuffer: true, values: false },
+  );
 
   // Look up many messages using the array of primaryKeys
   return getManyMessages(db, primaryKeys);
 };
 
-export const getMessagesPruneIterator = (db: RocksDB, fid: number, setPostfix: UserMessagePostfix): Iterator => {
-  const prefix = makeMessagePrimaryKey(fid, setPostfix);
-  return db.iteratorByPrefix(prefix, { keys: false, valueAsBuffer: true });
-};
-
-export const getNextMessageFromIterator = async (iterator: Iterator): Promise<Message> => {
-  const [, value] = await iterator.next();
-  return Message.decode(new Uint8Array(value as Buffer));
-};
-
 export const putMessageTransaction = (txn: Transaction, message: Message): Transaction => {
   if (!message.data) {
-    throw new HubError('bad_request.invalid_param', 'message data is missing');
+    throw new HubError("bad_request.invalid_param", "message data is missing");
   }
   const tsHash = makeTsHash(message.data.timestamp, message.hash);
   if (tsHash.isErr()) {
@@ -293,7 +298,7 @@ export const putMessageTransaction = (txn: Transaction, message: Message): Trans
 
 export const deleteMessageTransaction = (txn: Transaction, message: Message): Transaction => {
   if (!message.data) {
-    throw new HubError('bad_request.invalid_param', 'message data is missing');
+    throw new HubError("bad_request.invalid_param", "message data is missing");
   }
   const tsHash = makeTsHash(message.data.timestamp, message.hash);
   if (tsHash.isErr()) {

@@ -1,24 +1,24 @@
-import { bytesIncrement, HubError, isHubError } from '@farcaster/hub-nodejs';
-import { AbstractBatch, AbstractChainedBatch, AbstractIterator } from 'abstract-leveldown';
-import { mkdir } from 'fs';
-import AbstractRocksDB from '@farcaster/rocksdb';
-import { logger } from '../../utils/logger.js';
+import { bytesIncrement, HubError, isHubError } from "@farcaster/hub-nodejs";
+import { AbstractBatch, AbstractChainedBatch, AbstractIterator } from "abstract-leveldown";
+import { mkdir } from "fs";
+import AbstractRocksDB from "@farcaster/rocksdb";
+import { logger } from "../../utils/logger.js";
 
-export const DB_DIRECTORY = '.rocks';
+export const DB_DIRECTORY = ".rocks";
 export const MAX_DB_ITERATOR_OPEN_MILLISECONDS = 60 * 1000; // 1 min
-const DB_NAME_DEFAULT = 'farcaster';
+const DB_NAME_DEFAULT = "farcaster";
 
 export type Transaction = AbstractChainedBatch<Buffer, Buffer>;
 
 const log = logger.child({
-  component: 'RocksDB',
+  component: "RocksDB",
 });
 
 const parseError = (e: Error): HubError => {
   if (/NotFound/i.test(e.message)) {
-    return new HubError('not_found', e);
+    return new HubError("not_found", e);
   }
-  return new HubError('unavailable.storage_failure', e);
+  return new HubError("unavailable.storage_failure", e);
 };
 
 export class Iterator {
@@ -37,11 +37,12 @@ export class Iterator {
   async *[Symbol.asyncIterator]() {
     try {
       let kv: [Buffer | undefined, Buffer | undefined] | undefined;
+      // rome-ignore lint/suspicious/noAssignInExpressions: legacy code, avoid using ignore for new code, to fix
       while ((kv = await this.next())) {
         yield kv;
       }
     } catch (e) {
-      if (!(isHubError(e) && e.errCode === 'not_found')) {
+      if (!(isHubError(e) && e.errCode === "not_found")) {
         throw e;
       }
     } finally {
@@ -55,7 +56,7 @@ export class Iterator {
         if (err) {
           reject(err);
         } else if (key === undefined && value === undefined) {
-          reject(new HubError('not_found', 'record not found'));
+          reject(new HubError("not_found", "record not found"));
         } else {
           resolve([key as Buffer | undefined, value as Buffer | undefined]);
         }
@@ -64,7 +65,7 @@ export class Iterator {
   }
 
   async end(): Promise<void> {
-    if (this._iterator['_ended']) return Promise.resolve(undefined);
+    if (this._iterator["_ended"]) return Promise.resolve(undefined);
 
     return new Promise((resolve, reject) => {
       this._iterator.end((err: Error | undefined) => {
@@ -91,9 +92,13 @@ class RocksDB {
    */
   private _openIterators: Set<{
     iterator: Iterator;
+    id: number;
     openTimestamp: number;
     options: AbstractRocksDB.IteratorOptions | undefined;
+    stackTrace: string;
+    timeoutMs: number;
   }>;
+  private _openIteratorId = 0;
   private _iteratorCheckTimer?: NodeJS.Timer;
 
   constructor(name?: string) {
@@ -105,11 +110,18 @@ class RocksDB {
         if (!entry.iterator.isOpen) {
           return [];
         } else {
-          if (now - entry.openTimestamp >= MAX_DB_ITERATOR_OPEN_MILLISECONDS) {
+          const timeout = entry.timeoutMs ?? MAX_DB_ITERATOR_OPEN_MILLISECONDS;
+          const openFor = now - entry.openTimestamp;
+          if (openFor >= timeout) {
             log.warn(
-              entry.options,
-              `RocksDB iterator open
-                for more than ${MAX_DB_ITERATOR_OPEN_MILLISECONDS} ms`
+              {
+                options: entry.options,
+                openForMs: openFor,
+                stackTrace: entry.stackTrace,
+                id: entry.id,
+                timeoutMs: entry.timeoutMs,
+              },
+              "RocksDB iterator open for longer than timeout",
             );
           }
           return [entry];
@@ -120,7 +132,7 @@ class RocksDB {
   }
 
   get location() {
-    return this._db['location'];
+    return this._db["location"];
   }
 
   get status() {
@@ -173,16 +185,14 @@ class RocksDB {
 
   open(): Promise<void> {
     return new Promise((resolve, reject) => {
-      if (this._db.status === 'opening') {
-        reject(new Error('db is opening'));
-      } else if (this._db.status === 'closing') {
-        reject(new Error('db is closing'));
-      } else if (this._db.status === 'open') {
+      if (this._db.status === "opening") {
+        reject(new Error("db is opening"));
+      } else if (this._db.status === "closing") {
+        reject(new Error("db is closing"));
+      } else if (this._db.status === "open") {
         resolve(undefined);
       } else {
-        // NOTE: eslint falsely identifies `open(...)` as `fs.open`.
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
-        mkdir(this._db['location'], { recursive: true }, (fsErr: Error | null) => {
+        mkdir(this._db["location"], { recursive: true }, (fsErr: Error | null) => {
           if (fsErr) reject(parseError(fsErr));
           this._db.open({ createIfMissing: true, errorIfExists: false }, (e?: Error) => {
             if (!e) {
@@ -196,6 +206,11 @@ class RocksDB {
   }
 
   close(): Promise<void> {
+    // Close the iterator check timer
+    if (this._iteratorCheckTimer) {
+      clearInterval(this._iteratorCheckTimer);
+    }
+
     return new Promise((resolve, reject) => {
       this._db.close((e?: Error) => {
         e ? reject(parseError(e)) : resolve(undefined);
@@ -205,30 +220,39 @@ class RocksDB {
 
   clear(): Promise<void> {
     return new Promise((resolve, reject) => {
-      this._db['clear']((e?: Error) => {
+      this._db["clear"]((e?: Error) => {
         e ? reject(parseError(e)) : resolve(undefined);
       });
     });
   }
 
   async destroy(): Promise<void> {
-    if (this._db.status === 'open') {
+    if (this._db.status === "open") {
       await this.close();
     }
     return new Promise((resolve, reject) => {
       if (!this._hasOpened) {
-        reject(new Error('db never opened'));
+        reject(new Error("db never opened"));
       } else {
-        AbstractRocksDB.destroy(this._db['location'], (e?: Error) => {
+        AbstractRocksDB.destroy(this._db["location"], (e?: Error) => {
           e ? reject(parseError(e)) : resolve(undefined);
         });
       }
     });
   }
 
-  iterator(options?: AbstractRocksDB.IteratorOptions): Iterator {
+  iterator(options?: AbstractRocksDB.IteratorOptions, timeoutMs = MAX_DB_ITERATOR_OPEN_MILLISECONDS): Iterator {
+    const stackTrace = new Error().stack || "<no stacktrace>";
+
     const iterator = new Iterator(this._db.iterator({ ...options, valueAsBuffer: true, keyAsBuffer: true }));
-    this._openIterators.add({ iterator: iterator, openTimestamp: Date.now(), options: options });
+    this._openIterators.add({
+      id: this._openIteratorId++,
+      iterator: iterator,
+      openTimestamp: Date.now(),
+      options: options,
+      stackTrace,
+      timeoutMs,
+    });
     return iterator;
   }
 
@@ -265,6 +289,116 @@ class RocksDB {
       prefixOptions.lt = Buffer.from(nextPrefix.value);
     }
     return this.iterator({ ...options, ...prefixOptions });
+  }
+
+  /**
+   * forEach iterator, but with a prefix. See @forEachITerator for more details
+   */
+  async forEachIteratorByPrefix<T>(
+    prefix: Buffer,
+    callback: (key: Buffer | undefined, value: Buffer | undefined) => Promise<T> | T,
+    options: AbstractRocksDB.IteratorOptions = {},
+    timeout = MAX_DB_ITERATOR_OPEN_MILLISECONDS,
+  ): Promise<T | undefined> {
+    const prefixOptions: AbstractRocksDB.IteratorOptions = {
+      gte: prefix,
+    };
+    const nextPrefix = bytesIncrement(new Uint8Array(prefix));
+    if (nextPrefix.isErr()) {
+      throw nextPrefix.error;
+    }
+    if (nextPrefix.value.length === prefix.length) {
+      prefixOptions.lt = Buffer.from(nextPrefix.value);
+    }
+
+    return this.forEachIterator(callback, { ...options, ...prefixOptions }, timeout);
+  }
+
+  /**
+   * An iterator that implements a callback. If the callback
+   * 1. returns true/value
+   * 2. returns a promise that resolves to true/value
+   * 3. throws an error
+   * 4. Finishes iterating
+   * 5. Times out
+   *
+   * We'll close the iterator
+   */
+  async forEachIterator<T>(
+    callback: (key: Buffer | undefined, value: Buffer | undefined) => Promise<T> | T,
+    options: AbstractRocksDB.IteratorOptions = {},
+    timeoutMs = MAX_DB_ITERATOR_OPEN_MILLISECONDS,
+  ): Promise<T | undefined> {
+    const iterator = this.iterator(options, timeoutMs);
+    const timeoutId = setTimeout(async () => {
+      await iterator.end();
+    }, timeoutMs);
+
+    let returnValue: T | undefined | void;
+    // rome-ignore lint/suspicious/noExplicitAny: <explanation>
+    let caughtError: any;
+
+    // The try/catch is outside the for loop so that we can catch errors thrown by the iterator
+    // the most common error is "cannot call next() after end()", which is when the iterator has timed out
+    try {
+      for await (const [key, value] of iterator) {
+        try {
+          returnValue = await callback(key, value);
+          if (returnValue) {
+            await iterator.end();
+            break;
+          }
+        } catch (e) {
+          await iterator.end();
+          caughtError = e;
+          break;
+        }
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message === "cannot call next() after end()") {
+        // The iterator timed out
+        log.warn({ options, timeout: timeoutMs }, "forEachIterator: iterator timed out");
+      } else {
+        await iterator.end();
+        caughtError = e;
+      }
+    }
+
+    // The iterator should be closed here, but log an error if it isn't
+    if (iterator.isOpen) {
+      // Find the iterator entry in the iterators set
+      const iteratorEntry = [...this._openIterators].find((entry) => {
+        return entry.iterator === iterator;
+      });
+
+      if (iteratorEntry) {
+        const logOpts = {
+          options: iteratorEntry.options,
+          openSecs: Date.now() - iteratorEntry.openTimestamp,
+          stackTrace: iteratorEntry.stackTrace,
+          id: iteratorEntry.id,
+        };
+
+        logger.error(logOpts, "forEachIterator: iterator was not closed. Force closing");
+        iterator.end();
+      } else {
+        logger.error("forEachIterator: iterator was not closed and could not find iterator entry");
+      }
+    }
+
+    clearTimeout(timeoutId);
+
+    // If we caught and error, throw it
+    if (caughtError) {
+      throw caughtError;
+    }
+
+    // If the callback returned a value, return it
+    if (returnValue) {
+      return returnValue;
+    } else {
+      return undefined;
+    }
   }
 
   async compact(): Promise<void> {

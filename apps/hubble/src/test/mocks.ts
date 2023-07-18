@@ -8,15 +8,15 @@ import {
   Message,
   NameRegistryEvent,
   UserNameProof,
-} from '@farcaster/hub-nodejs';
-import { ok, ResultAsync } from 'neverthrow';
-import { HubInterface, HubSubmitSource } from '../hubble.js';
-import { GossipNode } from '../network/p2p/gossipNode.js';
-import RocksDB from '../storage/db/rocksdb.js';
-import Engine from '../storage/engine/index.js';
-import { PeerId } from '@libp2p/interface-peer-id';
-import { ContactInfoContent } from '@farcaster/core';
-import { getHubState, putHubState } from '../storage/db/hubState.js';
+} from "@farcaster/hub-nodejs";
+import { ok, ResultAsync } from "neverthrow";
+import { HubInterface, HubSubmitSource } from "../hubble.js";
+import { GossipNode } from "../network/p2p/gossipNode.js";
+import RocksDB from "../storage/db/rocksdb.js";
+import Engine from "../storage/engine/index.js";
+import { PeerId } from "@libp2p/interface-peer-id";
+import { ContactInfoContent, RentRegistryEvent, StorageAdminRegistryEvent } from "@farcaster/core";
+import { getHubState, putHubState } from "../storage/db/hubState.js";
 
 export class MockHub implements HubInterface {
   public db: RocksDB;
@@ -30,10 +30,18 @@ export class MockHub implements HubInterface {
     this.gossipNode = gossipNode;
   }
 
+  async submitRentRegistryEvent(event: RentRegistryEvent): HubAsyncResult<number> {
+    return this.engine.mergeRentRegistryEvent(event);
+  }
+
+  async submitStorageAdminRegistryEvent(event: StorageAdminRegistryEvent): HubAsyncResult<number> {
+    return this.engine.mergeStorageAdminRegistryEvent(event);
+  }
+
   async submitMessage(message: Message, source?: HubSubmitSource): HubAsyncResult<number> {
     const result = await this.engine.mergeMessage(message);
 
-    if (result.isOk() && source === 'rpc' && this.gossipNode !== undefined) {
+    if (result.isOk() && source === "rpc" && this.gossipNode !== undefined) {
       void this.gossipNode.gossipMessage(message);
     }
 
@@ -54,7 +62,7 @@ export class MockHub implements HubInterface {
 
   async getHubState(): HubAsyncResult<HubState> {
     const result = await ResultAsync.fromPromise(getHubState(this.db), (e) => e as HubError);
-    if (result.isErr() && result.error.errCode === 'not_found') {
+    if (result.isErr() && result.error.errCode === "not_found") {
       const hubState = HubState.create({ lastEthBlock: 0, lastFnameProof: 0 });
       await putHubState(this.db, hubState);
       return ok(hubState);

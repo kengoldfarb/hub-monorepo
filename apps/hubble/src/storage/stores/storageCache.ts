@@ -3,28 +3,24 @@ import {
   HubEvent,
   HubResult,
   isMergeMessageHubEvent,
+  isMergeUsernameProofHubEvent,
   isPruneMessageHubEvent,
   isRevokeMessageHubEvent,
+  isUsernameProofMessage,
   Message,
-} from '@farcaster/hub-nodejs';
-import { err, ok } from 'neverthrow';
-import RocksDB from '../db/rocksdb.js';
-import { FID_BYTES, RootPrefix, UserMessagePostfix, UserMessagePostfixMax } from '../db/types.js';
-import { logger } from '../../utils/logger.js';
-import {
-  getMessagesPruneIterator,
-  makeFidKey,
-  makeMessagePrimaryKey,
-  makeTsHash,
-  typeToSetPostfix,
-} from '../db/message.js';
-import { bytesCompare, HubAsyncResult } from '@farcaster/core';
+} from "@farcaster/hub-nodejs";
+import { err, ok } from "neverthrow";
+import RocksDB from "../db/rocksdb.js";
+import { FID_BYTES, RootPrefix, UserMessagePostfix, UserMessagePostfixMax } from "../db/types.js";
+import { logger } from "../../utils/logger.js";
+import { makeFidKey, makeMessagePrimaryKey, makeTsHash, typeToSetPostfix } from "../db/message.js";
+import { bytesCompare, HubAsyncResult } from "@farcaster/core";
 
 const makeKey = (fid: number, set: UserMessagePostfix): string => {
-  return Buffer.concat([makeFidKey(fid), Buffer.from([set])]).toString('hex');
+  return Buffer.concat([makeFidKey(fid), Buffer.from([set])]).toString("hex");
 };
 
-const log = logger.child({ component: 'StorageCache' });
+const log = logger.child({ component: "StorageCache" });
 
 export class StorageCache {
   private _db: RocksDB;
@@ -38,39 +34,46 @@ export class StorageCache {
   }
 
   async syncFromDb(): Promise<void> {
-    log.info('starting storage cache sync');
+    log.info("starting storage cache sync");
     const usage = new Map<string, number>();
 
+    const start = Date.now();
+
     const prefix = Buffer.from([RootPrefix.User]);
-
-    const iterator = this._db.iteratorByPrefix(prefix);
-
-    for await (const [key] of iterator) {
-      const postfix = (key as Buffer).readUint8(1 + FID_BYTES);
-      if (postfix < UserMessagePostfixMax) {
-        const lookupKey = (key as Buffer).subarray(1, 1 + FID_BYTES + 1).toString('hex');
-        const count = usage.get(lookupKey) ?? 0;
-        if (this._earliestTsHashes.get(lookupKey) === undefined) {
-          const tsHash = Uint8Array.from((key as Buffer).subarray(1 + FID_BYTES + 1));
-          this._earliestTsHashes.set(lookupKey, tsHash);
+    await this._db.forEachIteratorByPrefix(
+      prefix,
+      async (key) => {
+        const postfix = (key as Buffer).readUint8(1 + FID_BYTES);
+        if (postfix < UserMessagePostfixMax) {
+          const lookupKey = (key as Buffer).subarray(1, 1 + FID_BYTES + 1).toString("hex");
+          const count = usage.get(lookupKey) ?? 0;
+          if (this._earliestTsHashes.get(lookupKey) === undefined) {
+            const tsHash = Uint8Array.from((key as Buffer).subarray(1 + FID_BYTES + 1));
+            this._earliestTsHashes.set(lookupKey, tsHash);
+          }
+          usage.set(lookupKey, count + 1);
         }
-        usage.set(lookupKey, count + 1);
-      }
-    }
+      },
+      { values: false },
+      15 * 60 * 1000, // 15 minutes
+    );
 
     this._counts = usage;
     this._earliestTsHashes = new Map();
-    log.info('storage cache synced');
+    log.info({ timeTakenMs: Date.now() - start }, "storage cache synced");
   }
 
   async getMessageCount(fid: number, set: UserMessagePostfix): HubAsyncResult<number> {
     const key = makeKey(fid, set);
     if (this._counts.get(key) === undefined) {
-      const iterator = getMessagesPruneIterator(this._db, fid, set);
-      for await (const [,] of iterator) {
-        const count = this._counts.get(key) ?? 0;
-        this._counts.set(key, count + 1);
-      }
+      await this._db.forEachIteratorByPrefix(
+        makeMessagePrimaryKey(fid, set),
+        () => {
+          const count = this._counts.get(key) ?? 0;
+          this._counts.set(key, count + 1);
+        },
+        { keys: false, valueAsBuffer: true },
+      );
     }
     return ok(this._counts.get(key) ?? 0);
   }
@@ -96,7 +99,7 @@ export class StorageCache {
       }
 
       if (firstKey && firstKey.length === 0) {
-        return err(new HubError('unavailable.storage_failure', 'could not read earliest message from db'));
+        return err(new HubError("unavailable.storage_failure", "could not read earliest message from db"));
       }
 
       const tsHash = Uint8Array.from(firstKey.subarray(1 + FID_BYTES + 1));
@@ -117,6 +120,12 @@ export class StorageCache {
       this.removeMessage(event.pruneMessageBody.message);
     } else if (isRevokeMessageHubEvent(event)) {
       this.removeMessage(event.revokeMessageBody.message);
+    } else if (isMergeUsernameProofHubEvent(event)) {
+      if (event.mergeUsernameProofBody.usernameProofMessage) {
+        this.addMessage(event.mergeUsernameProofBody.usernameProofMessage);
+      } else if (event.mergeUsernameProofBody.deletedUsernameProofMessage) {
+        this.removeMessage(event.mergeUsernameProofBody.deletedUsernameProofMessage);
+      }
     }
     return ok(undefined);
   }

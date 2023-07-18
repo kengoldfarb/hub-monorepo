@@ -1,6 +1,6 @@
 {
   "name": "@farcaster/hub-web",
-  "version": "0.3.6",
+  "version": "0.5.0",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
@@ -19,17 +19,17 @@
     "build": "tsup --config tsup.config.ts",
     "clean": "rimraf ./dist",
     "protoc": "protoc --plugin=./node_modules/.bin/protoc-gen-ts_proto  --ts_proto_out=./src/generated/ --ts_proto_opt=esModuleInterop=true,exportCommonSymbols=false,outputClientImpl=grpc-web,useOptionals=none,unrecognizedEnum=false,removeEnumPrefix=true,lowerCaseServiceMethods=true --proto_path=../../protobufs//schemas ../../protobufs/schemas/rpc.proto",
-    "lint": "eslint  src/ --color --ext .ts",
-    "lint:fix": "yarn run lint -- --fix",
+    "lint": "rome format src/ examples/ --write && rome check src/ examples/ --apply",
+    "lint:ci": "rome ci src/ examples/",
     "prepublishOnly": "yarn run build"
   },
   "devDependencies": {
     "eslint-config-custom": "*",
-    "prettier-config-custom": "*",
+    "rome-config-custom": "*",
     "ts-proto": "^1.146.0"
   },
   "dependencies": {
-    "@farcaster/core": "^0.9.1",
+    "@farcaster/core": "^0.11.0",
     "@improbable-eng/grpc-web": "^0.15.0",
     "rxjs": "^7.8.0"
   }

@@ -1,5 +1,43 @@
 # @farcaster/core
 
+## 0.11.0
+
+### Minor Changes
+
+- 2391c3a5: Adds support for storage events
+
+## 0.10.2
+
+### Patch Changes
+
+- cd0ddd6: feat: Add support for ens names
+- 4fa7a56: rename UserDataType.FNAME to UserDataType.USERNAME
+
+## 0.10.1
+
+### Patch Changes
+
+- 5a1baae: Switch fnames from contract events to fname server proofs
+
+## 0.10.0
+
+### Minor Changes
+
+- 159c62d: added ViemLocalEip712Signer to exports
+- bfdbfea: Used viem to verify Ethereum signatures
+
+  - Added `signUserNameProofClaim` to `Eip712Signer`
+  - Added `makeUserNameProofClaim`
+
+  - Breaking API changes
+    - make\*Data functions are now async
+    - removed top-level getSignerKey, signVerificationEthAddressClaim, and signMessageHash, use an Eip712Signer class (i.e. EthersEip712Signer or ViemLocalEip712Signer)
+    - rename `verifyUserNameProof` to `verifyUserNameProofClaim`
+
+### Patch Changes
+
+- 159c62d: bumped viem to 1.1.4
+
 ## 0.9.1
 
 ### Patch Changes

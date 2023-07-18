@@ -1,5 +1,44 @@
 # @farcaster/hub-nodejs
 
+## 0.9.0
+
+### Minor Changes
+
+- 2391c3a5: Adds support for storage events
+
+### Patch Changes
+
+- 57235761: Remove ethers dependency
+- Updated dependencies [2391c3a5]
+  - @farcaster/core@0.11.0
+
+## 0.8.4
+
+### Patch Changes
+
+- cd0ddd6: feat: Add support for ens names
+- 4fa7a56: rename UserDataType.FNAME to UserDataType.USERNAME
+- Updated dependencies [cd0ddd6]
+- Updated dependencies [4fa7a56]
+  - @farcaster/core@0.10.2
+
+## 0.8.3
+
+### Patch Changes
+
+- 5a1baae: Switch fnames from contract events to fname server proofs
+- Updated dependencies [5a1baae]
+  - @farcaster/core@0.10.1
+
+## 0.8.2
+
+### Patch Changes
+
+- Updated dependencies [159c62d]
+- Updated dependencies [159c62d]
+- Updated dependencies [bfdbfea]
+  - @farcaster/core@0.10.0
+
 ## 0.8.1
 
 ### Patch Changes

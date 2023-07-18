@@ -1,5 +1,74 @@
 # @farcaster/hubble
 
+## 1.4.2
+
+- 1d9c34af: Testnet should not require allow listed peers
+
+## 1.4.1
+
+### Minor Changes
+
+- 2391c3a5: Adds support for storage events
+- 15d43931: feat: support fallback RPC providers
+- 3dfc29de: fix: throw error if unable to fetch fname server signature
+- 71558f87: Reduce number of confirmations for ETH blocks from 6 to 3
+- 8d0d87dc: Add support for direct peering
+- f179dd6a: fix: Add managed iterator that will close the iterator under all conditions
+- 6042e957: fix: only revoke the username if the nameproof matches
+- 728a557a: Adjust chunk size to 1000 from 10000
+- a0dbfbd8: perf: Improve incremental sync performance
+- Updated dependencies [57235761]
+- Updated dependencies [2391c3a5]
+  - @farcaster/hub-nodejs@0.9.0
+
+## 1.4.0
+
+### Minor Changes
+
+- a38720b: chore: Hard fail on missing RPC urls.
+
+### Patch Changes
+
+- 2817141: perf: Tune sync parameters and add mergeMessages profile
+- b5becd9: fix: Improve logging for open iterators and add hub events timeout
+
+## 1.3.4
+
+### Patch Changes
+
+- d5d65bd: Prevent connecting to peers not in allowed peer list
+- 1d07446: Display correct app version when run in Docker container
+- f9c978a: Include bad_request.prunable in list of INVALID_ARGUMENT errors
+- f54185f: Updated EthEventProviders to hard fail unable to connect to eth RPC provider
+- e513a3f: fix: Prevent unnecessary sync and log messages by filtering out SyncIDs our node already has
+- 6e7ce94: perf: Fetch upto 4 leaf nodes at a time during sync
+- dbe6074: Allow log level to be configured via environment variable
+- cd0ddd6: feat: Add support for ens names
+- a08bff3: Better error messages for config file
+- 850f82f: perf: Add a sync profiler
+- 229b806: Add a "yarn profile storage" command that prints the usage of the RocksDB database
+- 4fa7a56: rename UserDataType.FNAME to UserDataType.USERNAME
+- Updated dependencies [cd0ddd6]
+- Updated dependencies [4fa7a56]
+  - @farcaster/hub-nodejs@0.8.4
+
+## 1.3.3
+
+### Patch Changes
+
+- abca3ed: Fixed bug with prune limits
+- 5a1baae: Switch fnames from contract events to fname server proofs
+- Updated dependencies [5a1baae]
+  - @farcaster/hub-nodejs@0.8.3
+
+## 1.3.2
+
+### Patch Changes
+
+- 159c62d: Upgraded viem to 1.1.4
+  Used viem to interact with ethereum
+  - @farcaster/hub-nodejs@0.8.2
+
 ## 1.3.1
 
 ### Patch Changes

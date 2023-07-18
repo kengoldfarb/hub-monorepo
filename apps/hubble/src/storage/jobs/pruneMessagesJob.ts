@@ -1,20 +1,21 @@
-import { HubAsyncResult } from '@farcaster/hub-nodejs';
-import { err, ok } from 'neverthrow';
-import cron from 'node-cron';
-import Engine from '../engine/index.js';
-import { logger } from '../../utils/logger.js';
+import { HubAsyncResult } from "@farcaster/hub-nodejs";
+import { err, ok } from "neverthrow";
+import cron from "node-cron";
+import Engine from "../engine/index.js";
+import { logger } from "../../utils/logger.js";
 
-export const DEFAULT_PRUNE_MESSAGES_JOB_CRON = '0 * * * *'; // Every hour at :00
+export const DEFAULT_PRUNE_MESSAGES_JOB_CRON = "0 * * * *"; // Every hour at :00
 
 const log = logger.child({
-  component: 'PruneMessagesJob',
+  component: "PruneMessagesJob",
 });
 
-type SchedulerStatus = 'started' | 'stopped';
+type SchedulerStatus = "started" | "stopped";
 
 export class PruneMessagesJobScheduler {
   private _engine: Engine;
   private _cronTask?: cron.ScheduledTask;
+  private _running = false;
 
   constructor(engine: Engine) {
     this._engine = engine;
@@ -31,11 +32,18 @@ export class PruneMessagesJobScheduler {
   }
 
   status(): SchedulerStatus {
-    return this._cronTask ? 'started' : 'stopped';
+    return this._cronTask ? "started" : "stopped";
   }
 
   async doJobs(): HubAsyncResult<void> {
-    log.info({}, 'starting prune messages job');
+    if (this._running) {
+      log.info({}, "prune messages job already running, skipping");
+      return ok(undefined);
+    }
+
+    log.info({}, "starting prune messages job");
+    const start = Date.now();
+    this._running = true;
 
     let finished = false;
     let pageToken: Uint8Array | undefined;
@@ -56,8 +64,9 @@ export class PruneMessagesJobScheduler {
       }
     } while (!finished);
 
-    log.info({}, 'finished prune messages job');
+    log.info({ timeTakenMs: Date.now() - start }, "finished prune messages job");
 
+    this._running = false;
     return ok(undefined);
   }
 }

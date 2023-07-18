@@ -1,15 +1,16 @@
-import { faker } from '@faker-js/faker';
-import { Factory } from '@farcaster/fishery';
-import { ed25519 } from '@noble/curves/ed25519';
-import { blake3 } from '@noble/hashes/blake3';
-import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
-import { randomBytes } from '@noble/hashes/utils';
-import * as protobufs from './protobufs';
-import { bytesToHexString } from './bytes';
-import { Ed25519Signer, Eip712Signer, NobleEd25519Signer, ViemLocalEip712Signer, Signer } from './signers';
-import { getFarcasterTime } from './time';
-import { VerificationEthAddressClaim } from './verifications';
-import { LocalAccount } from 'viem';
+import { faker } from "@faker-js/faker";
+import { Factory } from "@farcaster/fishery";
+import { ed25519 } from "@noble/curves/ed25519";
+import { blake3 } from "@noble/hashes/blake3";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { randomBytes } from "@noble/hashes/utils";
+import * as protobufs from "./protobufs";
+import { bytesToHexString, utf8StringToBytes } from "./bytes";
+import { Ed25519Signer, Eip712Signer, NobleEd25519Signer, ViemLocalEip712Signer, Signer } from "./signers";
+import { getFarcasterTime, toFarcasterTime } from "./time";
+import { VerificationEthAddressClaim } from "./verifications";
+import { LocalAccount } from "viem";
+import { UserNameType } from "./protobufs";
 
 /** Scalars */
 
@@ -38,7 +39,7 @@ const FnameFactory = Factory.define<Uint8Array>(() => {
         faker.datatype.number({ min: 97, max: 122 }),
       ]),
     ],
-    0
+    0,
   );
 
   // The name can contain [a-z 0-9 -] or the ascii numbers [45, 48-57, 97-122] inclusive
@@ -51,11 +52,16 @@ const FnameFactory = Factory.define<Uint8Array>(() => {
           faker.datatype.number({ min: 97, max: 122 }),
         ]),
       ],
-      i
+      i,
     );
   }
 
   return bytes;
+});
+
+const EnsNameFactory = Factory.define<Uint8Array>(() => {
+  const ensName = faker.random.alphaNumeric(faker.datatype.number({ min: 3, max: 16 }));
+  return utf8StringToBytes(ensName.concat(".eth"))._unsafeUnwrap();
 });
 
 /** Eth */
@@ -125,7 +131,7 @@ const UserDataTypeFactory = Factory.define<protobufs.UserDataType>(() => {
   return faker.helpers.arrayElement([
     protobufs.UserDataType.BIO,
     protobufs.UserDataType.DISPLAY,
-    protobufs.UserDataType.FNAME,
+    protobufs.UserDataType.USERNAME,
     protobufs.UserDataType.PFP,
     protobufs.UserDataType.URL,
   ]);
@@ -185,7 +191,7 @@ const MessageFactory = Factory.define<protobufs.Message, { signer?: Ed25519Signe
       data: CastAddDataFactory.build(),
       hashScheme: protobufs.HashScheme.BLAKE3,
     });
-  }
+  },
 );
 
 const MessageDataFactory = Factory.define<protobufs.MessageData>(() => {
@@ -234,9 +240,9 @@ const CastAddMessageFactory = Factory.define<protobufs.CastAddMessage, { signer?
 
     return MessageFactory.build(
       { data: CastAddDataFactory.build(), signatureScheme: protobufs.SignatureScheme.ED25519 },
-      { transient: transientParams }
+      { transient: transientParams },
     ) as protobufs.CastAddMessage;
-  }
+  },
 );
 
 const CastRemoveBodyFactory = Factory.define<protobufs.CastRemoveBody>(() => {
@@ -260,15 +266,15 @@ const CastRemoveMessageFactory = Factory.define<protobufs.CastRemoveMessage, { s
 
     return MessageFactory.build(
       { data: CastRemoveDataFactory.build(), signatureScheme: protobufs.SignatureScheme.ED25519 },
-      { transient: transientParams }
+      { transient: transientParams },
     ) as protobufs.CastRemoveMessage;
-  }
+  },
 );
 
 const LinkBodyFactory = Factory.define<protobufs.LinkBody>(() => {
   return protobufs.LinkBody.create({
     targetFid: FidFactory.build(),
-    type: 'follow',
+    type: "follow",
   });
 });
 
@@ -287,9 +293,9 @@ const LinkAddMessageFactory = Factory.define<protobufs.LinkAddMessage, { signer?
 
     return MessageFactory.build(
       { data: LinkAddDataFactory.build(), signatureScheme: protobufs.SignatureScheme.ED25519 },
-      { transient: transientParams }
+      { transient: transientParams },
     ) as protobufs.LinkAddMessage;
-  }
+  },
 );
 
 const LinkRemoveDataFactory = Factory.define<protobufs.LinkRemoveData>(() => {
@@ -307,9 +313,9 @@ const LinkRemoveMessageFactory = Factory.define<protobufs.LinkRemoveMessage, { s
 
     return MessageFactory.build(
       { data: LinkRemoveDataFactory.build(), signatureScheme: protobufs.SignatureScheme.ED25519 },
-      { transient: transientParams }
+      { transient: transientParams },
     ) as protobufs.LinkRemoveMessage;
-  }
+  },
 );
 
 const ReactionBodyFactory = Factory.define<protobufs.ReactionBody>(() => {
@@ -334,9 +340,9 @@ const ReactionAddMessageFactory = Factory.define<protobufs.ReactionAddMessage, {
 
     return MessageFactory.build(
       { data: ReactionAddDataFactory.build(), signatureScheme: protobufs.SignatureScheme.ED25519 },
-      { transient: transientParams }
+      { transient: transientParams },
     ) as protobufs.ReactionAddMessage;
-  }
+  },
 );
 
 const ReactionRemoveDataFactory = Factory.define<protobufs.ReactionRemoveData>(() => {
@@ -354,9 +360,9 @@ const ReactionRemoveMessageFactory = Factory.define<protobufs.ReactionRemoveMess
 
     return MessageFactory.build(
       { data: ReactionRemoveDataFactory.build(), signatureScheme: protobufs.SignatureScheme.ED25519 },
-      { transient: transientParams }
+      { transient: transientParams },
     ) as protobufs.ReactionRemoveMessage;
-  }
+  },
 );
 
 const SignerAddBodyFactory = Factory.define<protobufs.SignerAddBody>(() => {
@@ -381,9 +387,9 @@ const SignerAddMessageFactory = Factory.define<protobufs.SignerAddMessage, { sig
 
     return MessageFactory.build(
       { data: SignerAddDataFactory.build(), signatureScheme: protobufs.SignatureScheme.EIP712 },
-      { transient: transientParams }
+      { transient: transientParams },
     ) as protobufs.SignerAddMessage;
-  }
+  },
 );
 
 const SignerRemoveBodyFactory = Factory.define<protobufs.SignerRemoveBody>(() => {
@@ -407,9 +413,9 @@ const SignerRemoveMessageFactory = Factory.define<protobufs.SignerRemoveMessage,
 
     return MessageFactory.build(
       { data: SignerRemoveDataFactory.build(), signatureScheme: protobufs.SignatureScheme.EIP712 },
-      { transient: transientParams }
+      { transient: transientParams },
     ) as protobufs.SignerRemoveMessage;
-  }
+  },
 );
 
 const VerificationEthAddressClaimFactory = Factory.define<VerificationEthAddressClaim>(() => {
@@ -441,7 +447,7 @@ const VerificationAddEthAddressBodyFactory = Factory.define<
       const claim = VerificationEthAddressClaimFactory.build({
         fid: BigInt(fid),
         network,
-        blockHash: blockHash.isOk() ? blockHash.value : '0x',
+        blockHash: blockHash.isOk() ? blockHash.value : "0x",
         address: bytesToHexString(body.address)._unsafeUnwrap(),
       });
       body.ethSignature = (await ethSigner.signVerificationEthAddressClaim(claim))._unsafeUnwrap();
@@ -499,7 +505,7 @@ const VerificationAddEthAddressMessageFactory = Factory.define<
         transient: { signer: transientParams.ethSigner },
       }),
     },
-    { transient: { signer } }
+    { transient: { signer } },
   ) as protobufs.VerificationAddEthAddressMessage;
 });
 
@@ -541,9 +547,35 @@ const UserDataAddMessageFactory = Factory.define<protobufs.UserDataAddMessage, {
 
     return MessageFactory.build(
       { data: UserDataAddDataFactory.build(), signatureScheme: protobufs.SignatureScheme.ED25519 },
-      { transient: transientParams }
+      { transient: transientParams },
     ) as protobufs.UserDataAddMessage;
-  }
+  },
+);
+
+const UsernameProofDataFactory = Factory.define<protobufs.UsernameProofData>(() => {
+  const proofBody = UserNameProofFactory.build({
+    type: UserNameType.USERNAME_TYPE_ENS_L1,
+    name: EnsNameFactory.build(),
+  });
+  return MessageDataFactory.build({
+    usernameProofBody: proofBody,
+    type: protobufs.MessageType.USERNAME_PROOF,
+    timestamp: toFarcasterTime(proofBody.timestamp)._unsafeUnwrap(),
+    fid: proofBody.fid,
+  }) as protobufs.UsernameProofData;
+});
+
+const UsernameProofMessageFactory = Factory.define<protobufs.UsernameProofMessage, { signer?: Ed25519Signer }>(
+  ({ onCreate, transientParams }) => {
+    onCreate((message) => {
+      return MessageFactory.create(message, { transient: transientParams }) as Promise<protobufs.UsernameProofMessage>;
+    });
+
+    return MessageFactory.build(
+      { data: UsernameProofDataFactory.build(), signatureScheme: protobufs.SignatureScheme.ED25519 },
+      { transient: transientParams },
+    ) as protobufs.UsernameProofMessage;
+  },
 );
 
 /** Contract event Protobufs */
@@ -583,6 +615,46 @@ const NameRegistryEventFactory = Factory.define<protobufs.NameRegistryEvent>(() 
   });
 });
 
+const RentRegistryEventTypeFactory = Factory.define<protobufs.StorageRegistryEventType>(() => {
+  return faker.helpers.arrayElement([protobufs.StorageRegistryEventType.RENT]);
+});
+
+const RentRegistryEventFactory = Factory.define<protobufs.RentRegistryEvent>(() => {
+  return protobufs.RentRegistryEvent.create({
+    blockNumber: faker.datatype.number({ min: 1, max: 100_000 }),
+    blockHash: BlockHashFactory.build(),
+    transactionHash: TransactionHashFactory.build(),
+    logIndex: faker.datatype.number({ min: 0, max: 1_000 }),
+    payer: EthAddressFactory.build(),
+    fid: FidFactory.build(),
+    type: RentRegistryEventTypeFactory.build(),
+    units: faker.datatype.number({ min: 1, max: 1_000 }),
+    expiry: getFarcasterTime()._unsafeUnwrap() + 60 * 60 * 24 * 365, // a year
+  });
+});
+
+const StorageAdminRegistryEventTypeFactory = Factory.define<protobufs.StorageRegistryEventType>(() => {
+  return faker.helpers.arrayElement([
+    protobufs.StorageRegistryEventType.SET_DEPRECATION_TIMESTAMP,
+    protobufs.StorageRegistryEventType.SET_GRACE_PERIOD,
+    protobufs.StorageRegistryEventType.SET_MAX_UNITS,
+    protobufs.StorageRegistryEventType.SET_PRICE,
+  ]);
+});
+
+const StorageAdminRegistryEventFactory = Factory.define<protobufs.StorageAdminRegistryEvent>(() => {
+  return protobufs.StorageAdminRegistryEvent.create({
+    blockNumber: faker.datatype.number({ min: 1, max: 100_000 }),
+    blockHash: BlockHashFactory.build(),
+    transactionHash: TransactionHashFactory.build(),
+    logIndex: faker.datatype.number({ min: 0, max: 1_000 }),
+    timestamp: faker.datatype.number({ min: 0, max: 1_000 }),
+    from: EthAddressFactory.build(),
+    type: RentRegistryEventTypeFactory.build(),
+    value: BytesFactory.build({}, { transient: { length: 4 } }),
+  });
+});
+
 const UserNameProofFactory = Factory.define<protobufs.UserNameProof>(() => {
   return protobufs.UserNameProof.create({
     timestamp: Date.now(),
@@ -601,6 +673,7 @@ export const Factories = {
   MessageHash: MessageHashFactory,
   BlockHash: BlockHashFactory,
   EthAddress: EthAddressFactory,
+  EnsName: EnsNameFactory,
   TransactionHash: TransactionHashFactory,
   Ed25519PrivateKey: Ed25519PrivateKeyFactory,
   Ed25519PPublicKey: Ed25519PPublicKeyFactory,
@@ -654,4 +727,10 @@ export const Factories = {
   NameRegistryEventType: NameRegistryEventTypeFactory,
   NameRegistryEvent: NameRegistryEventFactory,
   UserNameProof: UserNameProofFactory,
+  UsernameProofData: UsernameProofDataFactory,
+  UsernameProofMessage: UsernameProofMessageFactory,
+  RentRegistryEventType: RentRegistryEventTypeFactory,
+  RentRegistryEvent: RentRegistryEventFactory,
+  StorageAdminRegistryEventType: StorageAdminRegistryEventTypeFactory,
+  StorageAdminRegistryEvent: StorageAdminRegistryEventFactory,
 };

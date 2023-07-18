@@ -53,8 +53,18 @@ export enum RootPrefix {
   HubEvents = 15,
   /* The network ID that the rocksDB was created with */
   Network = 16,
-  /* Used to store name proofs */
-  UserNameProof = 17,
+  /* Used to store fname server name proofs */
+  FNameUserNameProof = 17,
+  /* Used to store gossip network metrics */
+  GossipMetrics = 18,
+  /* Used to index user submited username proofs */
+  UserNameProofByName = 19,
+  /* Used to store rent registry events */
+  RentRegistryEvent = 20,
+  /* Index rent registry events by expiry */
+  RentRegistryEventsByExpiry = 21,
+  /* Used to store storage admin registry events */
+  StorageAdminRegistryEvent = 22,
 }
 
 /**
@@ -74,6 +84,7 @@ export enum UserPostfix {
   VerificationMessage = 4,
   SignerMessage = 5,
   UserDataMessage = 6,
+  UsernameProofMessage = 7,
 
   /** Index records (must be 86-255) */
 
@@ -115,4 +126,5 @@ export type UserMessagePostfix =
   | UserPostfix.VerificationMessage
   | UserPostfix.SignerMessage
   | UserPostfix.ReactionMessage
-  | UserPostfix.UserDataMessage;
+  | UserPostfix.UserDataMessage
+  | UserPostfix.UsernameProofMessage;

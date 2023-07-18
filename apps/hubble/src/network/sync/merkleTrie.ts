@@ -1,12 +1,14 @@
-import { Result, ResultAsync } from 'neverthrow';
-import ReadWriteLock from 'rwlock';
-import { HubError, Message } from '@farcaster/hub-nodejs';
-import { SyncId } from './syncId.js';
-import { TrieNode, TrieSnapshot } from './trieNode.js';
-import RocksDB from '../../storage/db/rocksdb.js';
-import { FID_BYTES, RootPrefix, UserMessagePostfixMax } from '../../storage/db/types.js';
-import { logger } from '../../utils/logger.js';
+import { Result, ResultAsync } from "neverthrow";
+import ReadWriteLock from "rwlock";
+import { HubError, Message } from "@farcaster/hub-nodejs";
+import { SyncId } from "./syncId.js";
+import { TrieNode, TrieSnapshot } from "./trieNode.js";
+import RocksDB from "../../storage/db/rocksdb.js";
+import { FID_BYTES, RootPrefix, UserMessagePostfixMax } from "../../storage/db/types.js";
+import { logger } from "../../utils/logger.js";
 
+// The number of messages to process before unloading the trie from memory
+// Approx 25k * 10 nodes * 65 bytes per node = approx 16MB of cached data
 const TRIE_UNLOAD_THRESHOLD = 25_000;
 
 /**
@@ -25,7 +27,7 @@ export type NodeMetadata = {
 };
 
 const log = logger.child({
-  component: 'SyncMerkleTrie',
+  component: "SyncMerkleTrie",
 });
 
 /**
@@ -65,8 +67,8 @@ class MerkleTrie {
           if (rootBytes && rootBytes.length > 0) {
             this._root = TrieNode.deserialize(rootBytes);
             log.info(
-              { rootHash: Buffer.from(this._root.hash).toString('hex'), items: this.items },
-              'Merkle Trie loaded from DB'
+              { rootHash: Buffer.from(this._root.hash).toString("hex"), items: this.items },
+              "Merkle Trie loaded from DB",
             );
           }
         } catch (e) {
@@ -83,10 +85,10 @@ class MerkleTrie {
     // First, delete the root node
     const dbStatus = await ResultAsync.fromPromise(
       this._db.del(TrieNode.makePrimaryKey(new Uint8Array())),
-      (e) => e as HubError
+      (e) => e as HubError,
     );
     if (dbStatus.isErr()) {
-      log.warn('Error Deleting trie root node. Ignoring', dbStatus.error);
+      log.warn("Error Deleting trie root node. Ignoring", dbStatus.error);
     }
 
     // Brand new empty root node
@@ -94,24 +96,29 @@ class MerkleTrie {
 
     // Rebuild the trie by iterating over all the messages in the db
     const prefix = Buffer.from([RootPrefix.User]);
-    const iterator = this._db.iteratorByPrefix(prefix);
     let count = 0;
-    for await (const [key, value] of iterator) {
-      const postfix = (key as Buffer).readUint8(1 + FID_BYTES);
-      if (postfix < UserMessagePostfixMax) {
-        const message = Result.fromThrowable(
-          () => Message.decode(new Uint8Array(value as Buffer)),
-          (e) => e as HubError
-        )();
-        if (message.isOk()) {
-          await this.insert(new SyncId(message.value));
-          count += 1;
-          if (count % 10_000 === 0) {
-            log.info({ count }, 'Rebuilding Merkle Trie');
+
+    await this._db.forEachIteratorByPrefix(
+      prefix,
+      async (key, value) => {
+        const postfix = (key as Buffer).readUint8(1 + FID_BYTES);
+        if (postfix < UserMessagePostfixMax) {
+          const message = Result.fromThrowable(
+            () => Message.decode(new Uint8Array(value as Buffer)),
+            (e) => e as HubError,
+          )();
+          if (message.isOk()) {
+            await this.insert(new SyncId(message.value));
+            count += 1;
+            if (count % 10_000 === 0) {
+              log.info({ count }, "Rebuilding Merkle Trie");
+            }
           }
         }
-      }
-    }
+      },
+      {},
+      1 * 60 * 60 * 1000,
+    );
   }
 
   public async insert(id: SyncId): Promise<boolean> {
@@ -126,7 +133,7 @@ class MerkleTrie {
 
           resolve(status);
         } catch (e) {
-          log.error({ e }, 'Insert Error');
+          log.error({ e }, "Insert Error");
 
           resolve(false);
         }
@@ -150,7 +157,7 @@ class MerkleTrie {
 
           resolve(status);
         } catch (e) {
-          log.error({ e }, 'Delete Error');
+          log.error({ e }, "Delete Error");
 
           resolve(false);
         }
@@ -162,14 +169,27 @@ class MerkleTrie {
 
   /**
    * Check if the SyncId exists in the trie.
-   *
-   * Note: This method is only used in tests and benchmarks, and should not be needed in production.
    */
   public async exists(id: SyncId): Promise<boolean> {
     return new Promise((resolve) => {
       this._lock.readLock(async (release) => {
-        // eslint-disable-next-line security/detect-non-literal-fs-filename
         const r = await this._root.exists(id.syncId(), this._db);
+
+        await this._unloadFromMemory(false);
+
+        resolve(r);
+        release();
+      });
+    });
+  }
+
+  /**
+   * Check if we already have this syncID (expressed as bytes)
+   */
+  public async existsByBytes(id: Uint8Array): Promise<boolean> {
+    return new Promise((resolve) => {
+      this._lock.readLock(async (release) => {
+        const r = await this._root.exists(id, this._db);
 
         await this._unloadFromMemory(false);
 
@@ -270,7 +290,7 @@ class MerkleTrie {
   public async rootHash(): Promise<string> {
     return new Promise((resolve) => {
       this._lock.readLock(async (release) => {
-        resolve(Buffer.from(this._root.hash).toString('hex'));
+        resolve(Buffer.from(this._root.hash).toString("hex"));
         release();
       });
     });
@@ -305,18 +325,22 @@ class MerkleTrie {
   private async _unloadFromMemory(writeLocked: boolean, force = false) {
     // Every TRIE_UNLOAD_THRESHOLD calls, we unload the trie from memory to avoid memory leaks.
     // Every call in this class usually loads one root-to-leaf path of the trie, so
-    // we unload the trie from memory every 1000 calls. This allows us to keep the
+    // we unload the trie from memory every TRIE_UNLOAD_THRESHOLD calls. This allows us to keep the
     // most recently used parts of the trie in memory, while still "garbage collecting"
     // the rest of the trie.
 
     // Fn that does the actual unloading
     const doUnload = async () => {
       this._callsSinceLastUnload = 0;
-      logger.info('Unloading trie from memory');
 
-      // First, we need to commit any pending db updates.
+      if (this._pendingDbUpdates.size === 0) {
+        // Trie has no pending DB updates, skipping unload
+        return;
+      }
+
       const txn = this._db.transaction();
 
+      // Collect all the pending DB updates into a single transaction batch
       for (const [key, value] of this._pendingDbUpdates) {
         if (value && value.length > 0) {
           txn.put(key, value);
@@ -326,7 +350,7 @@ class MerkleTrie {
       }
 
       await this._db.commit(txn);
-      logger.info({ numDbUpdates: this._pendingDbUpdates.size }, 'Trie committed pending DB updates');
+      logger.info({ numDbUpdates: this._pendingDbUpdates.size, force }, "Trie committed pending DB updates");
 
       this._pendingDbUpdates.clear();
       this._root.unloadChildren();
